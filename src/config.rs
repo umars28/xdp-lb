@@ -3,7 +3,9 @@ use std::{net::Ipv4Addr, path::Path};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::types::{MAX_BACKENDS, MAX_SERVICES};
+use crate::types::{MAGLEV_SIZE, MAX_BACKENDS, MAX_SERVICES};
+
+const GOOD_DISTRIBUTION_RATIO: u32 = 8;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -14,7 +16,34 @@ pub struct Config {
     pub health_interval_secs: u64,
     #[serde(default = "default_health_timeout")]
     pub health_timeout_ms: u64,
+    #[serde(default)]
+    pub weighting: Option<WeightingConfig>,
     pub services: Vec<ServiceConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WeightingConfig {
+    pub endpoint: String,
+    pub query: String,
+    #[serde(default = "default_weight_mode")]
+    pub mode: WeightMode,
+    #[serde(default = "default_instance_label")]
+    pub instance_label: String,
+    #[serde(default = "default_weight_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_weight_timeout")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_min_weight")]
+    pub min_weight: u32,
+    #[serde(default = "default_max_weight")]
+    pub max_weight: u32,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WeightMode {
+    Proportional,
+    Inverse,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,11 +82,19 @@ pub struct BackendConfig {
     pub mac: Option<String>,
     #[serde(default)]
     pub drain: bool,
+    #[serde(default)]
+    pub metrics_instance: Option<String>,
 }
 
 impl BackendConfig {
     pub fn key(&self) -> String {
         format!("{}:{}", self.address, self.port)
+    }
+
+    pub fn metrics_identity(&self) -> String {
+        self.metrics_instance
+            .clone()
+            .unwrap_or_else(|| self.address.to_string())
     }
 }
 
@@ -79,6 +116,30 @@ fn default_protocol() -> Protocol {
 
 fn default_weight() -> u32 {
     1
+}
+
+fn default_weight_mode() -> WeightMode {
+    WeightMode::Proportional
+}
+
+fn default_instance_label() -> String {
+    "instance".to_string()
+}
+
+fn default_weight_interval() -> u64 {
+    15
+}
+
+fn default_weight_timeout() -> u64 {
+    2000
+}
+
+fn default_min_weight() -> u32 {
+    1
+}
+
+fn default_max_weight() -> u32 {
+    16
 }
 
 impl Config {
@@ -131,8 +192,70 @@ impl Config {
                         .with_context(|| format!("service {} backend {}", svc.name, be.address))?;
                 }
             }
+
+            self.check_maglev_budget(svc)?;
         }
 
+        if let Some(weighting) = &self.weighting {
+            weighting.validate()?;
+        }
+
+        Ok(())
+    }
+
+    fn check_maglev_budget(&self, svc: &ServiceConfig) -> Result<()> {
+        let ceiling = match &self.weighting {
+            Some(weighting) => weighting.max_weight,
+            None => svc.backends.iter().map(|be| be.weight).max().unwrap_or(1),
+        };
+        let worst_case = svc.backends.len() as u32 * ceiling;
+
+        if worst_case > MAGLEV_SIZE {
+            bail!(
+                "service {} can reach {worst_case} maglev candidates ({} backends x weight {ceiling}) \
+                 but the table only has {MAGLEV_SIZE} slots; lower max_weight or split the service",
+                svc.name,
+                svc.backends.len()
+            );
+        }
+
+        if worst_case * GOOD_DISTRIBUTION_RATIO > MAGLEV_SIZE {
+            tracing::warn!(
+                service = %svc.name,
+                candidates = worst_case,
+                slots = MAGLEV_SIZE,
+                "maglev candidates are close to the table size; traffic share will drift from the configured weights"
+            );
+        }
+
+        Ok(())
+    }
+}
+
+impl WeightingConfig {
+    fn validate(&self) -> Result<()> {
+        if self.min_weight == 0 {
+            bail!("weighting.min_weight must be at least 1; weight 0 removes a backend silently");
+        }
+        if self.max_weight < self.min_weight {
+            bail!(
+                "weighting.max_weight ({}) is below min_weight ({})",
+                self.max_weight,
+                self.min_weight
+            );
+        }
+        if self.query.trim().is_empty() {
+            bail!("weighting.query is empty");
+        }
+        if !self.endpoint.starts_with("http://") && !self.endpoint.starts_with("https://") {
+            bail!(
+                "weighting.endpoint must start with http:// or https://, got {:?}",
+                self.endpoint
+            );
+        }
+        if self.interval_secs == 0 {
+            bail!("weighting.interval_secs must be at least 1");
+        }
         Ok(())
     }
 }

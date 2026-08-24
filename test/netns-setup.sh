@@ -4,7 +4,6 @@ set -euo pipefail
 BRIDGE=br-xdplb
 VIP=10.0.0.100
 BACKEND_PORT=8080
-PIDFILE=/tmp/xdp-lb-backends.pids
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ $EUID -ne 0 ]]; then
@@ -61,11 +60,9 @@ for addr in 10.0.0.11 10.0.0.12; do
 	ip netns exec lb ping -c 1 -W 1 "$addr" >/dev/null || true
 done
 
-: >"$PIDFILE"
 for ns in be1 be2; do
 	setsid ip netns exec "$ns" python3 "$HERE/backend.py" "$ns" "$BACKEND_PORT" \
 		</dev/null >"/tmp/xdp-lb-$ns.log" 2>&1 &
-	echo $! >>"$PIDFILE"
 done
 
 sleep 1

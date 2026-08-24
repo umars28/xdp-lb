@@ -3,6 +3,17 @@ metrics_addr: "0.0.0.0:9500"
 health_interval_secs: 3
 health_timeout_ms: 500
 
+weighting:
+  endpoint: "http://mimir.internal:9090"
+  query: |
+    100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)
+  mode: proportional
+  instance_label: instance
+  interval_secs: 15
+  timeout_ms: 2000
+  min_weight: 1
+  max_weight: 16
+
 services:
   - name: web
     vip: 10.0.0.100
@@ -15,3 +26,5 @@ services:
       - address: 10.0.0.12
         port: 8080
         weight: 1
+        drain: false
+        metrics_instance: "backend-b.internal"

@@ -1,4 +1,4 @@
-use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
+use std::{collections::HashMap, net::Ipv4Addr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use aya::{programs::Xdp, programs::XdpFlags, Ebpf};
@@ -17,6 +17,7 @@ use xdp_lb::{
         be16, be32, Backend, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE, MODE_NAT,
         NO_BACKEND,
     },
+    weights::PrometheusSource,
 };
 
 #[derive(Parser, Debug)]
@@ -54,6 +55,7 @@ struct BackendSlot {
     address: Ipv4Addr,
     port: u16,
     weight: u32,
+    metrics_identity: String,
     mac_override: Option<[u8; 6]>,
     mac: Option<[u8; 6]>,
     healthy: bool,
@@ -133,20 +135,55 @@ async fn main() -> Result<()> {
     });
     info!(addr = %cfg.metrics_addr, "metrics endpoint listening");
 
-    let mut ticker = tokio::time::interval(Duration::from_secs(cfg.health_interval_secs));
+    let weight_source = match &cfg.weighting {
+        Some(weighting) => {
+            info!(
+                endpoint = %weighting.endpoint,
+                mode = ?weighting.mode,
+                every = weighting.interval_secs,
+                "weights will follow prometheus"
+            );
+            Some(PrometheusSource::new(weighting)?)
+        }
+        None => None,
+    };
+
+    let mut health_ticker = tokio::time::interval(Duration::from_secs(cfg.health_interval_secs));
+    let mut weight_ticker = tokio::time::interval(Duration::from_secs(
+        cfg.weighting
+            .as_ref()
+            .map(|weighting| weighting.interval_secs)
+            .unwrap_or(3600),
+    ));
     let timeout = Duration::from_millis(cfg.health_timeout_ms);
-    let mut reconciles = 0u64;
-    let mut rebuilds = 0u64;
+
+    let mut counters = Counters::default();
 
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
+            _ = health_ticker.tick() => {
                 probe_all(&mut slots, timeout).await;
                 resolve_macs(&mut slots, &interface);
 
-                reconciles += 1;
-                rebuilds += sync(&mut plane, &mut slots, &drain)?;
-                update_snapshot(&plane, &slots, &snapshot, &drain, reconciles, rebuilds)?;
+                counters.reconciles += 1;
+                counters.rebuilds += sync(&mut plane, &mut slots, &drain)?;
+                update_snapshot(&plane, &slots, &snapshot, &drain, &counters)?;
+            }
+            _ = weight_ticker.tick(), if weight_source.is_some() => {
+                let source = weight_source.as_ref().expect("guarded by the select arm");
+                match source.scores().await {
+                    Ok(scores) => {
+                        counters.weight_refreshes += 1;
+                        if apply_weights(source, &mut slots, &scores) > 0 {
+                            counters.rebuilds += sync(&mut plane, &mut slots, &drain)?;
+                        }
+                        update_snapshot(&plane, &slots, &snapshot, &drain, &counters)?;
+                    }
+                    Err(err) => {
+                        counters.weight_failures += 1;
+                        warn!(%err, "cannot refresh weights, keeping the current ones");
+                    }
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("shutting down, detaching xdp program");
@@ -156,6 +193,42 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn apply_weights(
+    source: &PrometheusSource,
+    slots: &mut [ServiceSlot],
+    scores: &HashMap<String, f64>,
+) -> usize {
+    let mut changed = 0;
+
+    for slot in slots.iter_mut() {
+        let identities: Vec<String> = slot
+            .backends
+            .iter()
+            .map(|backend| backend.metrics_identity.clone())
+            .collect();
+        let derived = source.weights_for(scores, &identities);
+
+        for backend in slot.backends.iter_mut() {
+            let Some(weight) = derived.get(&backend.metrics_identity) else {
+                continue;
+            };
+            if backend.weight != *weight {
+                info!(
+                    service = %slot.name,
+                    backend = %backend.key(),
+                    from = backend.weight,
+                    to = *weight,
+                    "weight followed the metric"
+                );
+                backend.weight = *weight;
+                changed += 1;
+            }
+        }
+    }
+
+    changed
 }
 
 fn build_slots(cfg: &Config) -> Vec<ServiceSlot> {
@@ -172,6 +245,7 @@ fn build_slots(cfg: &Config) -> Vec<ServiceSlot> {
                     address: be.address,
                     port: be.port,
                     weight: be.weight,
+                    metrics_identity: be.metrics_identity(),
                     mac_override: be.mac.as_deref().and_then(|m| config::parse_mac(m).ok()),
                     mac: None,
                     healthy: false,
@@ -322,13 +396,20 @@ fn sync(plane: &mut DataPlane, slots: &mut [ServiceSlot], drain: &DrainList) -> 
     Ok(rebuilds)
 }
 
+#[derive(Debug, Default)]
+struct Counters {
+    reconciles: u64,
+    rebuilds: u64,
+    weight_refreshes: u64,
+    weight_failures: u64,
+}
+
 fn update_snapshot(
     plane: &DataPlane,
     slots: &[ServiceSlot],
     snapshot: &SharedSnapshot,
     drain: &DrainList,
-    reconciles: u64,
-    rebuilds: u64,
+    counters: &Counters,
 ) -> Result<()> {
     let global = plane
         .global_stats()?
@@ -354,8 +435,10 @@ fn update_snapshot(
     if let Ok(mut guard) = snapshot.write() {
         guard.global = global;
         guard.backends = backends;
-        guard.reconcile_count = reconciles;
-        guard.table_rebuild_count = rebuilds;
+        guard.reconcile_count = counters.reconciles;
+        guard.table_rebuild_count = counters.rebuilds;
+        guard.weight_refresh_count = counters.weight_refreshes;
+        guard.weight_failure_count = counters.weight_failures;
     }
 
     Ok(())

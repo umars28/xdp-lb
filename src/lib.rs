@@ -8,3 +8,4 @@ pub mod neigh;
 pub mod object;
 pub mod progtest;
 pub mod types;
+pub mod weights;

@@ -32,6 +32,8 @@ pub struct Snapshot {
     pub backends: Vec<BackendSample>,
     pub reconcile_count: u64,
     pub table_rebuild_count: u64,
+    pub weight_refresh_count: u64,
+    pub weight_failure_count: u64,
 }
 
 pub type SharedSnapshot = Arc<RwLock<Snapshot>>;
@@ -229,6 +231,28 @@ async fn render(State(state): State<AppState>) -> impl IntoResponse {
         body,
         "xdplb_table_rebuild_total {}",
         snapshot.table_rebuild_count
+    );
+
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_weight_refresh_total Successful weight refreshes from the metrics backend."
+    );
+    let _ = writeln!(body, "# TYPE xdplb_weight_refresh_total counter");
+    let _ = writeln!(
+        body,
+        "xdplb_weight_refresh_total {}",
+        snapshot.weight_refresh_count
+    );
+
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_weight_refresh_failed_total Weight refreshes that failed; the previous weights stay in force."
+    );
+    let _ = writeln!(body, "# TYPE xdplb_weight_refresh_failed_total counter");
+    let _ = writeln!(
+        body,
+        "xdplb_weight_refresh_failed_total {}",
+        snapshot.weight_failure_count
     );
 
     (StatusCode::OK, body)

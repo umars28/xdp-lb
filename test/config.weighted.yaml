@@ -1,0 +1,24 @@
+interface: eth0
+metrics_addr: "0.0.0.0:9500"
+health_interval_secs: 2
+health_timeout_ms: 300
+
+weighting:
+  endpoint: "http://127.0.0.1:9091"
+  query: 'xdplb_backend_capacity'
+  mode: proportional
+  instance_label: instance
+  interval_secs: 3
+  min_weight: 1
+  max_weight: 16
+
+services:
+  - name: web
+    vip: 10.0.0.100
+    port: 80
+    protocol: tcp
+    backends:
+      - address: 10.0.0.11
+        port: 8080
+      - address: 10.0.0.12
+        port: 8080

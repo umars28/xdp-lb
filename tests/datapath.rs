@@ -430,6 +430,34 @@ fn established_flows_take_the_conntrack_path() {
 
 #[test]
 #[ignore = "needs root"]
+fn established_flows_survive_the_backend_leaving_the_table() {
+    let mut harness = Harness::load();
+    harness.ready();
+
+    let packet = forward_packet();
+    assert_eq!(harness.run(&packet).verdict, XDP_TX);
+
+    harness.point_every_slot_at_nothing();
+    harness.publish_backend(0);
+
+    let outcome = harness.run(&packet);
+    assert_eq!(
+        outcome.verdict,
+        XDP_TX,
+        "a flow already in conntrack must keep flowing, got {}",
+        outcome.verdict_name()
+    );
+    assert_eq!(
+        ip_dst(&outcome.packet),
+        BACKEND_IP.parse::<Ipv4Addr>().unwrap(),
+        "the flow must stay pinned to the backend it started on"
+    );
+    assert_eq!(tcp_dst_port(&outcome.packet), BACKEND_PORT);
+    assert_checksums_valid(&outcome.packet);
+}
+
+#[test]
+#[ignore = "needs root"]
 fn vip_traffic_is_dropped_when_no_backend_is_active() {
     let mut harness = Harness::load();
     harness.publish_service();

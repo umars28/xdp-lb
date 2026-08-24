@@ -12,8 +12,15 @@ if [[ $EUID -ne 0 ]]; then
 	exit 1
 fi
 
+"$HERE/netns-teardown.sh" >/dev/null 2>&1 || true
+
+for _ in $(seq 20); do
+	ip link show "$BRIDGE" &>/dev/null || break
+	sleep 0.2
+done
+
 if ip link show "$BRIDGE" &>/dev/null; then
-	echo "$BRIDGE already exists; run netns-teardown.sh first" >&2
+	echo "$BRIDGE still present after teardown" >&2
 	exit 1
 fi
 
@@ -22,6 +29,8 @@ ip link set "$BRIDGE" up
 
 attach() {
 	local ns=$1 addr=$2 prefix=$3
+	ip netns del "$ns" 2>/dev/null || true
+	ip link del "veth-$ns" 2>/dev/null || true
 	ip netns add "$ns"
 	ip link add "veth-$ns" type veth peer name eth0 netns "$ns"
 	ip link set "veth-$ns" master "$BRIDGE" up

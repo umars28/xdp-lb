@@ -9,8 +9,9 @@ use tracing::{info, warn};
 use xdp_lb::{
     config::{self, Config, Protocol},
     dataplane::DataPlane,
+    drain::DrainList,
     health, maglev,
-    metrics::{self, BackendSample, SharedSnapshot},
+    metrics::{self, AppState, BackendSample, SharedSnapshot},
     neigh, object,
     types::{
         be16, be32, Backend, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE, MODE_NAT,
@@ -58,6 +59,12 @@ struct BackendSlot {
     healthy: bool,
 }
 
+impl BackendSlot {
+    fn key(&self) -> String {
+        format!("{}:{}", self.address, self.port)
+    }
+}
+
 struct ServiceSlot {
     svc_id: u32,
     name: String,
@@ -102,11 +109,25 @@ async fn main() -> Result<()> {
     let mut slots = build_slots(&cfg);
     publish_services(&mut plane, &slots)?;
 
+    let drain = DrainList::seed(
+        cfg.services
+            .iter()
+            .flat_map(|svc| svc.backends.iter())
+            .filter(|be| be.drain)
+            .map(|be| be.key()),
+    );
+    for entry in drain.entries() {
+        info!(backend = %entry, "backend starts drained");
+    }
+
     let snapshot = metrics::shared();
     let metrics_addr = cfg.metrics_addr.clone();
-    let metrics_snapshot = snapshot.clone();
+    let state = AppState {
+        snapshot: snapshot.clone(),
+        drain: drain.clone(),
+    };
     tokio::spawn(async move {
-        if let Err(err) = metrics::serve(&metrics_addr, metrics_snapshot).await {
+        if let Err(err) = metrics::serve(&metrics_addr, state).await {
             warn!(%err, "metrics server exited");
         }
     });
@@ -124,8 +145,8 @@ async fn main() -> Result<()> {
                 resolve_macs(&mut slots, &interface);
 
                 reconciles += 1;
-                rebuilds += sync(&mut plane, &mut slots)?;
-                update_snapshot(&plane, &slots, &snapshot, reconciles, rebuilds)?;
+                rebuilds += sync(&mut plane, &mut slots, &drain)?;
+                update_snapshot(&plane, &slots, &snapshot, &drain, reconciles, rebuilds)?;
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("shutting down, detaching xdp program");
@@ -252,7 +273,7 @@ fn resolve_macs(slots: &mut [ServiceSlot], interface: &str) {
     }
 }
 
-fn sync(plane: &mut DataPlane, slots: &mut [ServiceSlot]) -> Result<u64> {
+fn sync(plane: &mut DataPlane, slots: &mut [ServiceSlot], drain: &DrainList) -> Result<u64> {
     let mut rebuilds = 0u64;
 
     for slot in slots.iter_mut() {
@@ -273,15 +294,12 @@ fn sync(plane: &mut DataPlane, slots: &mut [ServiceSlot]) -> Result<u64> {
         let weights: Vec<(u32, u32)> = slot
             .backends
             .iter()
-            .filter(|b| b.healthy && b.mac.is_some())
+            .filter(|b| b.healthy && b.mac.is_some() && !drain.contains(&b.key()))
             .map(|b| (b.index, b.weight))
             .collect();
 
-        let lookup: std::collections::HashMap<u32, String> = slot
-            .backends
-            .iter()
-            .map(|b| (b.index, format!("{}:{}", b.address, b.port)))
-            .collect();
+        let lookup: std::collections::HashMap<u32, String> =
+            slot.backends.iter().map(|b| (b.index, b.key())).collect();
 
         let candidates = maglev::expand_weighted(&weights, |idx| {
             lookup.get(&idx).cloned().unwrap_or_else(|| idx.to_string())
@@ -308,6 +326,7 @@ fn update_snapshot(
     plane: &DataPlane,
     slots: &[ServiceSlot],
     snapshot: &SharedSnapshot,
+    drain: &DrainList,
     reconciles: u64,
     rebuilds: u64,
 ) -> Result<()> {
@@ -320,10 +339,12 @@ fn update_snapshot(
     let mut backends = Vec::new();
     for slot in slots {
         for backend in &slot.backends {
+            let key = backend.key();
             backends.push(BackendSample {
                 service: slot.name.clone(),
-                address: format!("{}:{}", backend.address, backend.port),
                 healthy: backend.healthy && backend.mac.is_some(),
+                draining: drain.contains(&key),
+                address: key,
                 weight: backend.weight,
                 stats: plane.backend_stats(backend.index)?,
             });

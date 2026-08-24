@@ -1,5 +1,6 @@
 pub mod config;
 pub mod dataplane;
+pub mod drain;
 pub mod health;
 pub mod maglev;
 pub mod metrics;

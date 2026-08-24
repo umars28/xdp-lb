@@ -51,6 +51,14 @@ pub struct BackendConfig {
     pub weight: u32,
     #[serde(default)]
     pub mac: Option<String>,
+    #[serde(default)]
+    pub drain: bool,
+}
+
+impl BackendConfig {
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.address, self.port)
+    }
 }
 
 fn default_metrics_addr() -> String {

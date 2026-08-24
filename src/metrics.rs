@@ -4,16 +4,24 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Router,
+};
+use serde::Deserialize;
 use tokio::net::TcpListener;
 
-use crate::types::StatVal;
+use crate::{drain::DrainList, types::StatVal};
 
 #[derive(Debug, Default, Clone)]
 pub struct BackendSample {
     pub service: String,
     pub address: String,
     pub healthy: bool,
+    pub draining: bool,
     pub weight: u32,
     pub stats: StatVal,
 }
@@ -32,7 +40,18 @@ pub fn shared() -> SharedSnapshot {
     Arc::new(RwLock::new(Snapshot::default()))
 }
 
-pub async fn serve(addr: &str, snapshot: SharedSnapshot) -> Result<()> {
+#[derive(Clone)]
+pub struct AppState {
+    pub snapshot: SharedSnapshot,
+    pub drain: DrainList,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BackendQuery {
+    backend: String,
+}
+
+pub async fn serve(addr: &str, state: AppState) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("cannot bind metrics listener on {addr}"))?;
@@ -40,15 +59,73 @@ pub async fn serve(addr: &str, snapshot: SharedSnapshot) -> Result<()> {
     let app = Router::new()
         .route("/metrics", get(render))
         .route("/healthz", get(|| async { "ok" }))
-        .with_state(snapshot);
+        .route("/drain", get(list_drained).post(start_drain))
+        .route("/undrain", post(stop_drain))
+        .with_state(state);
 
     axum::serve(listener, app)
         .await
         .context("metrics server stopped")
 }
 
-async fn render(State(snapshot): State<SharedSnapshot>) -> impl IntoResponse {
-    let Ok(snapshot) = snapshot.read() else {
+async fn list_drained(State(state): State<AppState>) -> impl IntoResponse {
+    let mut body = String::new();
+    for entry in state.drain.entries() {
+        let _ = writeln!(body, "{entry}");
+    }
+    (StatusCode::OK, body)
+}
+
+async fn start_drain(
+    State(state): State<AppState>,
+    Query(query): Query<BackendQuery>,
+) -> impl IntoResponse {
+    if !known_backend(&state, &query.backend) {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no backend named {}\n", query.backend),
+        );
+    }
+    let changed = state.drain.drain(&query.backend);
+    let verb = if changed {
+        "draining"
+    } else {
+        "already draining"
+    };
+    (StatusCode::OK, format!("{} {verb}\n", query.backend))
+}
+
+async fn stop_drain(
+    State(state): State<AppState>,
+    Query(query): Query<BackendQuery>,
+) -> impl IntoResponse {
+    if !known_backend(&state, &query.backend) {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no backend named {}\n", query.backend),
+        );
+    }
+    let changed = state.drain.undrain(&query.backend);
+    let verb = if changed {
+        "serving"
+    } else {
+        "already serving"
+    };
+    (StatusCode::OK, format!("{} {verb}\n", query.backend))
+}
+
+fn known_backend(state: &AppState, backend: &str) -> bool {
+    match state.snapshot.read() {
+        Ok(snapshot) => snapshot
+            .backends
+            .iter()
+            .any(|sample| sample.address == backend),
+        Err(_) => false,
+    }
+}
+
+async fn render(State(state): State<AppState>) -> impl IntoResponse {
+    let Ok(snapshot) = state.snapshot.read() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, String::new());
     };
 
@@ -105,6 +182,21 @@ async fn render(State(snapshot): State<SharedSnapshot>) -> impl IntoResponse {
             sample.service,
             sample.address,
             u8::from(sample.healthy)
+        );
+    }
+
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_backend_draining Backend excluded from new flows but still serving established ones."
+    );
+    let _ = writeln!(body, "# TYPE xdplb_backend_draining gauge");
+    for sample in &snapshot.backends {
+        let _ = writeln!(
+            body,
+            "xdplb_backend_draining{{service=\"{}\",backend=\"{}\"}} {}",
+            sample.service,
+            sample.address,
+            u8::from(sample.draining)
         );
     }
 

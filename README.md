@@ -148,9 +148,11 @@ CI menjalankan kedua lapisan itu plus trafik nyata lewat rig network namespace p
 
 ## Batasan yang perlu diketahui
 
-**Belum ada angka benchmark.** Semua pengujian berjalan di mode SKB di atas veth, yang membuang
-keuntungan performa utama XDP. Angka dari mode SKB tidak akan dilaporkan sebagai angka XDP. Untuk
-benchmark yang jujur dibutuhkan NIC fisik dengan dukungan XDP native.
+**Belum ada perbandingan throughput dengan nginx atau IPVS.** Yang ada baru biaya CPU per paket di
+dalam datapath (`make bench`, lihat `docs/BENCHMARK.md`) — diukur tanpa NIC, tanpa driver, tanpa
+kontensi. Itu batas atas yang dipaksakan datapath pada satu core, bukan throughput sistem.
+Perbandingan head-to-head butuh dua mesin bare-metal dan masih ada di roadmap. Semua pengujian
+fungsional juga berjalan di mode SKB di atas veth, yang membuang keuntungan performa utama XDP.
 
 **Mode NAT menuntut LB di jalur balik.** Balasan backend harus lewat load balancer agar source IP
 bisa dikembalikan ke VIP. Kalau itu tidak bisa dijamin di topologimu, pakai `forwarding: dsr`.
@@ -182,6 +184,7 @@ Kalau development dari macOS, pakai VM Linux — lihat `docs/DEVELOPMENT.md`.
 | --- | --- |
 | `docs/DEVELOPMENT.md` | Setup VM, rig test, dan urutan debugging |
 | `docs/FORWARDING.md` | NAT vs DSR: cara kerja, syarat backend, dan angka perbandingannya |
+| `docs/BENCHMARK.md` | Biaya per paket tiap jalur, dan kenapa metode pertama saya salah |
 | `docs/WEIGHTING.md` | Bobot dinamis: mode, pencocokan metrik, perilaku saat metrik hilang |
 | `docs/NOTES.md` | Bug yang menghabiskan waktu paling banyak dan penjelasannya |
 | `docs/ROADMAP.md` | Yang belum dikerjakan dan yang sengaja tidak dikerjakan |

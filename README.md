@@ -48,7 +48,7 @@ datapath.
 | --- | --- |
 | Pemilihan backend | Maglev consistent hashing dengan bobot |
 | Persistensi flow | Conntrack LRU dua arah, satu juta entry |
-| Mode forwarding | NAT (DNAT masuk, SNAT balik), keduanya di satu program XDP |
+| Mode forwarding | NAT (DNAT masuk, SNAT balik) atau DSR (enkapsulasi IPIP), per service |
 | Health check | TCP connect aktif, paralel, dengan timeout |
 | Bobot dinamis | Query PromQL ke Prometheus/Mimir, mode `proportional` atau `inverse` |
 | Graceful drain | `POST /drain` — flow baru berhenti, flow lama diselesaikan |
@@ -110,7 +110,17 @@ xdplb_weight_refresh_failed_total 1
 requests: 20 ... failed: 0
 ```
 
-Counter datapath saat 40 koneksi:
+**DSR memotong beban LB** — 30 request yang sama, service yang sama, hanya mode forwarding berbeda:
+
+| | NAT | DSR | |
+| --- | --- | --- | --- |
+| Paket diproses LB | 412 | 238 | -42% |
+| Byte diproses LB | 35.494 | 18.674 | -47% |
+
+Dan itu meskipun DSR *menambah* 20 byte enkapsulasi per paket arah masuk. Bahwa balasan benar-benar
+tidak lewat LB diverifikasi tiga cara terpisah — lihat `docs/FORWARDING.md`.
+
+Counter datapath saat 40 koneksi (mode NAT):
 
 ```
 xdplb_packets_total{verdict="conntrack_miss"}  40     # tepat satu per koneksi baru
@@ -125,8 +135,8 @@ Isi map `conntrack` 80 entry untuk 40 koneksi — dua per koneksi, satu tiap ara
 Dua lapisan, karena keduanya bisa hijau sementara integrasinya rusak.
 
 ```
-make test            # 34 test control plane, tanpa root
-make test-datapath   # 14 test datapath lewat BPF_PROG_TEST_RUN, butuh root
+make test            # 51 test control plane, tanpa root
+make test-datapath   # 16 test datapath lewat BPF_PROG_TEST_RUN, butuh root
 ```
 
 Test datapath menjalankan program XDP dengan paket sintetis, tanpa NIC, bridge, atau routing sama
@@ -143,8 +153,11 @@ keuntungan performa utama XDP. Angka dari mode SKB tidak akan dilaporkan sebagai
 benchmark yang jujur dibutuhkan NIC fisik dengan dukungan XDP native.
 
 **Mode NAT menuntut LB di jalur balik.** Balasan backend harus lewat load balancer agar source IP
-bisa dikembalikan ke VIP. Kalau itu tidak bisa dijamin di topologimu, yang dibutuhkan DSR — belum
-diimplementasikan.
+bisa dikembalikan ke VIP. Kalau itu tidak bisa dijamin di topologimu, pakai `forwarding: dsr`.
+
+**DSR tidak memeriksa MTU.** Enkapsulasi menambah 20 byte; paket yang sudah sebesar MTU akan dibuang
+driver tanpa jejak. Menambahkan pemeriksaan berarti menanamkan asumsi angka MTU ke datapath, jadi
+untuk sekarang ini batasan yang didokumentasikan, bukan asumsi tersembunyi.
 
 **Rate limiting bersifat aproksimatif.** Bucket-nya per-CPU, jadi batas agregatnya mendekati angka
 yang dikonfigurasi ketika trafik menyebar rata antar CPU, dan lebih ketat ketika menumpuk di satu
@@ -168,6 +181,7 @@ Kalau development dari macOS, pakai VM Linux — lihat `docs/DEVELOPMENT.md`.
 | | |
 | --- | --- |
 | `docs/DEVELOPMENT.md` | Setup VM, rig test, dan urutan debugging |
+| `docs/FORWARDING.md` | NAT vs DSR: cara kerja, syarat backend, dan angka perbandingannya |
 | `docs/WEIGHTING.md` | Bobot dinamis: mode, pencocokan metrik, perilaku saat metrik hilang |
 | `docs/NOTES.md` | Bug yang menghabiskan waktu paling banyak dan penjelasannya |
 | `docs/ROADMAP.md` | Yang belum dikerjakan dan yang sengaja tidak dikerjakan |

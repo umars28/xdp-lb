@@ -11,8 +11,9 @@ pub const BACKEND_ACTIVE: u16 = 1 << 0;
 pub const NO_BACKEND: u32 = u32::MAX;
 
 pub const MODE_NAT: u8 = 0;
+pub const MODE_DSR: u8 = 1;
 
-pub const STAT_NAMES: [&str; 8] = [
+pub const STAT_NAMES: [&str; 9] = [
     "rx",
     "tx",
     "pass",
@@ -21,6 +22,7 @@ pub const STAT_NAMES: [&str; 8] = [
     "conntrack_miss",
     "no_backend",
     "rate_limited",
+    "no_headroom",
 ];
 
 pub const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -38,6 +40,7 @@ pub struct ServiceKey {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ServiceInfo {
     pub svc_id: u32,
+    pub dsr_source: u32,
     pub mode: u8,
     pub pad: [u8; 3],
 }
@@ -154,6 +157,22 @@ mod tests {
 
     #[test]
     fn stat_names_cover_every_datapath_counter() {
-        assert_eq!(STAT_NAMES.len(), 8);
+        assert_eq!(STAT_NAMES.len(), 9);
+    }
+
+    #[test]
+    fn service_info_matches_the_datapath_layout() {
+        assert_eq!(std::mem::size_of::<ServiceInfo>(), 12);
+        assert_eq!(std::mem::align_of::<ServiceInfo>(), 4);
+    }
+
+    #[test]
+    fn service_key_matches_the_datapath_layout() {
+        assert_eq!(std::mem::size_of::<ServiceKey>(), 8);
+    }
+
+    #[test]
+    fn backend_matches_the_datapath_layout() {
+        assert_eq!(std::mem::size_of::<Backend>(), 16);
     }
 }

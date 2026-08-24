@@ -192,6 +192,80 @@ static __always_inline int new_flow_allowed(__be32 saddr, __u64 now)
 	return 1;
 }
 
+static __always_inline __u16 header_csum(struct iphdr *iph)
+{
+	__u16 *word = (__u16 *)iph;
+	__u32 sum = 0;
+	int i;
+
+	iph->check = 0;
+
+#pragma clang loop unroll(full)
+	for (i = 0; i < (int)(sizeof(*iph) / 2); i++)
+		sum += word[i];
+
+	return csum_fold(sum);
+}
+
+static __always_inline int encap_dsr(struct xdp_md *ctx, struct nat_entry *nat, __u64 pkt_len)
+{
+	void *data = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
+	struct ethhdr *eth = data;
+
+	if ((void *)(eth + 1) > data_end)
+		return XDP_DROP;
+
+	struct iphdr *inner = (void *)(eth + 1);
+
+	if ((void *)(inner + 1) > data_end)
+		return XDP_DROP;
+
+	struct ethhdr saved;
+	__u16 inner_len = bpf_ntohs(inner->tot_len);
+
+	__builtin_memcpy(&saved, eth, sizeof(saved));
+
+	if (bpf_xdp_adjust_head(ctx, 0 - (int)sizeof(struct iphdr))) {
+		stat_bump(STAT_NO_HEADROOM, pkt_len);
+		return XDP_DROP;
+	}
+
+	data = (void *)(long)ctx->data;
+	data_end = (void *)(long)ctx->data_end;
+
+	struct ethhdr *outer_eth = data;
+
+	if ((void *)(outer_eth + 1) > data_end)
+		return XDP_DROP;
+
+	struct iphdr *outer = (void *)(outer_eth + 1);
+
+	if ((void *)(outer + 1) > data_end)
+		return XDP_DROP;
+
+	__builtin_memcpy(outer_eth->h_source, saved.h_dest, ETH_ALEN);
+	__builtin_memcpy(outer_eth->h_dest, nat->dmac, ETH_ALEN);
+	outer_eth->h_proto = bpf_htons(ETH_P_IP);
+
+	outer->version = 4;
+	outer->ihl = 5;
+	outer->tos = 0;
+	outer->tot_len = bpf_htons(inner_len + (__u16)sizeof(struct iphdr));
+	outer->id = 0;
+	outer->frag_off = 0;
+	outer->ttl = 64;
+	outer->protocol = IPPROTO_IPIP;
+	outer->saddr = nat->outer_saddr;
+	outer->daddr = nat->addr;
+	outer->check = header_csum(outer);
+
+	backend_bump(nat->backend_idx, pkt_len);
+	stat_bump(STAT_TX, pkt_len);
+
+	return XDP_TX;
+}
+
 static __always_inline int apply_nat(struct ethhdr *eth, struct iphdr *iph,
 				     struct l4ports *ports, __u16 *l4_csum,
 				     struct nat_entry *nat, __u64 pkt_len)
@@ -288,6 +362,8 @@ int xdp_lb(struct xdp_md *ctx)
 	if (hit) {
 		hit->last_seen = bpf_ktime_get_ns();
 		stat_bump(STAT_CT_HIT, pkt_len);
+		if (hit->flags & NAT_DIR_DSR)
+			return encap_dsr(ctx, hit, pkt_len);
 		return apply_nat(eth, iph, ports, l4_csum, hit, pkt_len);
 	}
 
@@ -333,10 +409,18 @@ int xdp_lb(struct xdp_md *ctx)
 
 	fwd.addr = be->addr;
 	fwd.port = be->port;
-	fwd.flags = NAT_DIR_FWD;
 	__builtin_memcpy(fwd.dmac, be->mac, ETH_ALEN);
 	fwd.backend_idx = idx;
 	fwd.last_seen = now;
+
+	if (svc->mode == MODE_DSR) {
+		fwd.flags = NAT_DIR_DSR;
+		fwd.outer_saddr = svc->dsr_source;
+		bpf_map_update_elem(&conntrack, &fk, &fwd, BPF_ANY);
+		return encap_dsr(ctx, &fwd, pkt_len);
+	}
+
+	fwd.flags = NAT_DIR_FWD;
 
 	struct flow_key rk = {};
 

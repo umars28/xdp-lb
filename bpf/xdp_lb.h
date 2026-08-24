@@ -11,6 +11,7 @@
 
 #define NAT_DIR_FWD (1 << 0)
 #define NAT_DIR_REV (1 << 1)
+#define NAT_DIR_DSR (1 << 2)
 
 #define MODE_NAT 0
 #define MODE_DSR 1
@@ -26,6 +27,7 @@ enum stat_kind {
 	STAT_CT_MISS,
 	STAT_NO_BACKEND,
 	STAT_RATE_LIMITED,
+	STAT_NO_HEADROOM,
 	__STAT_MAX,
 };
 
@@ -45,6 +47,7 @@ struct service_key {
 
 struct service_info {
 	__u32 svc_id;
+	__be32 dsr_source;
 	__u8 mode;
 	__u8 pad[3];
 };
@@ -73,7 +76,7 @@ struct nat_entry {
 	__u8 dmac[6];
 	__u8 pad[2];
 	__u32 backend_idx;
-	__u8 pad2[4];
+	__be32 outer_saddr;
 	__u64 last_seen;
 };
 

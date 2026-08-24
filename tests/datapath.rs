@@ -9,7 +9,7 @@ use xdp_lb::{
     progtest::{self, XDP_DROP, XDP_PASS, XDP_TX},
     types::{
         be16, be32, Backend, RateConfig, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE,
-        MODE_NAT, NO_BACKEND,
+        MODE_DSR, MODE_NAT, NO_BACKEND,
     },
 };
 
@@ -20,6 +20,9 @@ const BACKEND_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x11];
 const CLIENT_IP: &str = "10.1.0.10";
 const VIP: &str = "10.0.0.100";
 const BACKEND_IP: &str = "10.0.0.11";
+const DSR_SOURCE: &str = "10.0.0.1";
+
+const PROTO_IPIP: u8 = 4;
 
 const CLIENT_PORT: u16 = 40000;
 const VIP_PORT: u16 = 80;
@@ -68,6 +71,14 @@ impl Harness {
     }
 
     fn publish_service(&mut self) {
+        self.publish_service_with(MODE_NAT, 0);
+    }
+
+    fn publish_dsr_service(&mut self) {
+        self.publish_service_with(MODE_DSR, be32(DSR_SOURCE.parse().unwrap()));
+    }
+
+    fn publish_service_with(&mut self, mode: u8, dsr_source: u32) {
         self.plane
             .put_service(
                 ServiceKey {
@@ -78,7 +89,8 @@ impl Harness {
                 },
                 ServiceInfo {
                     svc_id: 0,
-                    mode: MODE_NAT,
+                    dsr_source,
+                    mode,
                     pad: [0; 3],
                 },
             )
@@ -114,6 +126,12 @@ impl Harness {
 
     fn ready(&mut self) {
         self.publish_service();
+        self.publish_backend(BACKEND_ACTIVE);
+        self.point_every_slot_at_backend_zero();
+    }
+
+    fn ready_for_dsr(&mut self) {
+        self.publish_dsr_service();
         self.publish_backend(BACKEND_ACTIVE);
         self.point_every_slot_at_backend_zero();
     }
@@ -482,6 +500,95 @@ fn vip_traffic_is_dropped_when_no_backend_is_active() {
         outcome.verdict_name()
     );
     assert_eq!(harness.stat("no_backend"), 1);
+}
+
+#[test]
+#[ignore = "needs root"]
+fn dsr_wraps_the_original_packet_in_an_ipip_header() {
+    let mut harness = Harness::load();
+    harness.ready_for_dsr();
+
+    let original = forward_packet();
+    let outcome = harness.run(&original);
+
+    assert_eq!(
+        outcome.verdict,
+        XDP_TX,
+        "expected the encapsulated packet to be transmitted, got {}",
+        outcome.verdict_name()
+    );
+
+    let out = &outcome.packet;
+    assert_eq!(
+        out.len(),
+        original.len() + IP_LEN,
+        "the frame must grow by exactly one IPv4 header"
+    );
+
+    assert_eq!(eth_dst(out), BACKEND_MAC);
+    assert_eq!(eth_src(out), LB_MAC);
+    assert_eq!(
+        u16::from_be_bytes([out[12], out[13]]),
+        0x0800,
+        "the outer frame is still IPv4"
+    );
+
+    assert_eq!(
+        out[ETH_LEN + 9],
+        PROTO_IPIP,
+        "the outer header must announce IPIP"
+    );
+    assert_eq!(ip_src(out), DSR_SOURCE.parse::<Ipv4Addr>().unwrap());
+    assert_eq!(ip_dst(out), BACKEND_IP.parse::<Ipv4Addr>().unwrap());
+    assert_eq!(
+        u16::from_be_bytes([out[ETH_LEN + 2], out[ETH_LEN + 3]]) as usize,
+        original.len() - ETH_LEN + IP_LEN,
+        "the outer total length must cover the inner packet"
+    );
+    assert_eq!(
+        ones_complement(&out[ETH_LEN..ETH_LEN + IP_LEN]),
+        0,
+        "the outer header checksum is wrong"
+    );
+
+    let inner = &out[ETH_LEN + IP_LEN..];
+    assert_eq!(
+        inner,
+        &original[ETH_LEN..],
+        "the inner packet must reach the backend byte for byte, still addressed to the VIP"
+    );
+}
+
+#[test]
+#[ignore = "needs root"]
+fn dsr_keeps_a_flow_on_one_backend_without_a_reverse_entry() {
+    let mut harness = Harness::load();
+    harness.ready_for_dsr();
+
+    let packet = forward_packet();
+    assert_eq!(harness.run(&packet).verdict, XDP_TX);
+    assert_eq!(harness.stat("conntrack_miss"), 1);
+
+    let again = harness.run(&packet);
+    assert_eq!(again.verdict, XDP_TX);
+    assert_eq!(
+        harness.stat("conntrack_hit"),
+        1,
+        "the second packet must be served from conntrack"
+    );
+    assert_eq!(
+        ip_dst(&again.packet),
+        BACKEND_IP.parse::<Ipv4Addr>().unwrap()
+    );
+
+    let reply = reply_packet();
+    let outcome = harness.run(&reply);
+    assert_eq!(
+        outcome.verdict,
+        XDP_PASS,
+        "in dsr the backend answers the client directly, so no reverse entry may exist; got {}",
+        outcome.verdict_name()
+    );
 }
 
 #[test]

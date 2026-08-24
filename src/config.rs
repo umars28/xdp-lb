@@ -3,7 +3,7 @@ use std::{net::Ipv4Addr, path::Path};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::types::{MAGLEV_SIZE, MAX_BACKENDS, MAX_SERVICES, NANOS_PER_SECOND};
+use crate::types::{MAGLEV_SIZE, MAX_BACKENDS, MAX_SERVICES, MODE_DSR, MODE_NAT, NANOS_PER_SECOND};
 
 const GOOD_DISTRIBUTION_RATIO: u32 = 8;
 
@@ -87,7 +87,27 @@ pub struct ServiceConfig {
     pub port: u16,
     #[serde(default = "default_protocol")]
     pub protocol: Protocol,
+    #[serde(default = "default_forwarding")]
+    pub forwarding: Forwarding,
+    #[serde(default)]
+    pub dsr_source: Option<Ipv4Addr>,
     pub backends: Vec<BackendConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Forwarding {
+    Nat,
+    Dsr,
+}
+
+impl Forwarding {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Forwarding::Nat => MODE_NAT,
+            Forwarding::Dsr => MODE_DSR,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -148,6 +168,10 @@ fn default_protocol() -> Protocol {
     Protocol::Tcp
 }
 
+fn default_forwarding() -> Forwarding {
+    Forwarding::Nat
+}
+
 fn default_weight() -> u32 {
     1
 }
@@ -180,8 +204,11 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read config {}", path.display()))?;
-        let config: Config = serde_yaml::from_str(&raw)
-            .with_context(|| format!("cannot parse config {}", path.display()))?;
+        Self::parse(&raw).with_context(|| format!("in config {}", path.display()))
+    }
+
+    pub fn parse(raw: &str) -> Result<Self> {
+        let config: Config = serde_yaml::from_str(raw).context("cannot parse config")?;
         config.validate()?;
         Ok(config)
     }
@@ -209,6 +236,20 @@ impl Config {
             if svc.port == 0 {
                 bail!("service {} has port 0", svc.name);
             }
+            if svc.forwarding == Forwarding::Dsr && svc.dsr_source.is_none() {
+                bail!(
+                    "service {} uses dsr forwarding but has no dsr_source; the outer IPIP header \
+                     needs a source address the backends can route back to",
+                    svc.name
+                );
+            }
+            if svc.forwarding == Forwarding::Nat && svc.dsr_source.is_some() {
+                bail!(
+                    "service {} sets dsr_source but forwards with nat; remove one of the two so \
+                     the intent is unambiguous",
+                    svc.name
+                );
+            }
             for be in &svc.backends {
                 if be.port == 0 {
                     bail!("service {} has a backend with port 0", svc.name);
@@ -224,6 +265,18 @@ impl Config {
                 if let Some(mac) = &be.mac {
                     parse_mac(mac)
                         .with_context(|| format!("service {} backend {}", svc.name, be.address))?;
+                }
+                if svc.forwarding == Forwarding::Dsr && be.port != svc.port {
+                    bail!(
+                        "service {} forwards with dsr to {}:{} but listens on port {}; dsr does not \
+                         rewrite ports, so traffic would arrive on {} while health checks probe {}",
+                        svc.name,
+                        be.address,
+                        be.port,
+                        svc.port,
+                        svc.port,
+                        be.port
+                    );
                 }
             }
 
@@ -309,4 +362,146 @@ pub fn parse_mac(text: &str) -> Result<[u8; 6]> {
             .with_context(|| format!("malformed MAC address {text:?}"))?;
     }
     Ok(mac)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service(extra: &str, backends: &str) -> String {
+        format!(
+            "interface: eth0\nservices:\n  - name: web\n    vip: 10.0.0.100\n    port: 80\n{extra}    backends:\n{backends}"
+        )
+    }
+
+    fn one_backend(port: u16) -> String {
+        format!("      - address: 10.0.0.11\n        port: {port}\n")
+    }
+
+    fn error_of(raw: &str) -> String {
+        format!(
+            "{:#}",
+            Config::parse(raw).expect_err("config must be rejected")
+        )
+    }
+
+    #[test]
+    fn a_minimal_config_is_accepted() {
+        let cfg = Config::parse(&service("", &one_backend(8080))).expect("must parse");
+        assert_eq!(cfg.services[0].forwarding, Forwarding::Nat);
+        assert_eq!(cfg.services[0].protocol, Protocol::Tcp);
+        assert_eq!(cfg.services[0].backends[0].weight, 1);
+        assert!(!cfg.services[0].backends[0].drain);
+    }
+
+    #[test]
+    fn dsr_without_a_source_address_is_rejected() {
+        let raw = service("    forwarding: dsr\n", &one_backend(80));
+        assert!(error_of(&raw).contains("dsr_source"));
+    }
+
+    #[test]
+    fn dsr_with_a_mismatched_backend_port_is_rejected() {
+        let raw = service(
+            "    forwarding: dsr\n    dsr_source: 10.0.0.1\n",
+            &one_backend(8080),
+        );
+        let error = error_of(&raw);
+        assert!(error.contains("does not rewrite ports"), "got: {error}");
+    }
+
+    #[test]
+    fn dsr_with_a_matching_backend_port_is_accepted() {
+        let raw = service(
+            "    forwarding: dsr\n    dsr_source: 10.0.0.1\n",
+            &one_backend(80),
+        );
+        let cfg = Config::parse(&raw).expect("must parse");
+        assert_eq!(cfg.services[0].forwarding, Forwarding::Dsr);
+    }
+
+    #[test]
+    fn nat_with_a_dsr_source_is_rejected_as_ambiguous() {
+        let raw = service("    dsr_source: 10.0.0.1\n", &one_backend(8080));
+        assert!(error_of(&raw).contains("unambiguous"));
+    }
+
+    #[test]
+    fn weight_zero_is_rejected_because_it_hides_a_removal() {
+        let raw = service(
+            "",
+            "      - address: 10.0.0.11\n        port: 8080\n        weight: 0\n",
+        );
+        assert!(error_of(&raw).contains("weight 0"));
+    }
+
+    #[test]
+    fn a_service_without_backends_is_rejected() {
+        let raw = "interface: eth0\nservices:\n  - name: web\n    vip: 10.0.0.100\n    port: 80\n    backends: []\n";
+        assert!(error_of(raw).contains("no backends"));
+    }
+
+    #[test]
+    fn weights_that_overflow_the_maglev_table_are_rejected() {
+        let backends: String = (0..64)
+            .map(|i| format!("      - address: 10.0.1.{i}\n        port: 8080\n"))
+            .collect();
+        let raw = service("", &backends);
+        let with_weighting = raw.replace(
+            "services:",
+            "weighting:\n  endpoint: http://localhost:9090\n  query: up\n  max_weight: 128\nservices:",
+        );
+        let error = error_of(&with_weighting);
+        assert!(error.contains("maglev candidates"), "got: {error}");
+    }
+
+    #[test]
+    fn a_rate_limit_of_zero_is_rejected() {
+        let raw = service("", &one_backend(8080)).replace(
+            "services:",
+            "rate_limit:\n  new_flows_per_second: 0\nservices:",
+        );
+        assert!(error_of(&raw).contains("drop every new connection"));
+    }
+
+    #[test]
+    fn a_weighting_endpoint_without_a_scheme_is_rejected() {
+        let raw = service("", &one_backend(8080)).replace(
+            "services:",
+            "weighting:\n  endpoint: localhost:9090\n  query: up\nservices:",
+        );
+        assert!(error_of(&raw).contains("http://"));
+    }
+
+    #[test]
+    fn max_weight_below_min_weight_is_rejected() {
+        let raw = service("", &one_backend(8080)).replace(
+            "services:",
+            "weighting:\n  endpoint: http://localhost:9090\n  query: up\n  min_weight: 8\n  max_weight: 4\nservices:",
+        );
+        assert!(error_of(&raw).contains("below min_weight"));
+    }
+
+    #[test]
+    fn a_backend_metrics_identity_falls_back_to_its_address() {
+        let cfg = Config::parse(&service("", &one_backend(8080))).expect("must parse");
+        assert_eq!(cfg.services[0].backends[0].metrics_identity(), "10.0.0.11");
+    }
+
+    #[test]
+    fn a_malformed_mac_is_rejected() {
+        let raw = service(
+            "",
+            "      - address: 10.0.0.11\n        port: 8080\n        mac: \"nope\"\n",
+        );
+        assert!(error_of(&raw).contains("MAC"));
+    }
+
+    #[test]
+    fn a_mac_is_parsed_from_colon_separated_hex() {
+        assert_eq!(
+            parse_mac("aa:bb:cc:00:11:22").unwrap(),
+            [0xaa, 0xbb, 0xcc, 0x00, 0x11, 0x22]
+        );
+    }
 }

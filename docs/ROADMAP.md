@@ -13,6 +13,7 @@
 - Graceful drain lewat admin endpoint, dengan jaminan flow lama tetap dilayani
 - Bobot dinamis dari Prometheus, dengan fail-safe saat metrik hilang
 - Rate limiting flow baru per alamat sumber, token bucket per-CPU di XDP
+- DSR mode dengan enkapsulasi IPIP, terukur memotong 42% paket dan 47% byte di LB
 - CI: fmt, clippy, unit test, test datapath, dan trafik nyata lewat rig netns
 
 ## Berikutnya
@@ -25,9 +26,10 @@ dilaporkan sebagai angka XDP.
 Yang dibutuhkan: pembanding nginx stream dan IPVS di mesin yang sama, tiga metrik (pps per core, p99
 latency, CPU cycles per paket), dan generator trafik yang memakai port sumber acak.
 
-**DSR mode dengan enkapsulasi IPIP.** Sekarang mode-nya NAT, jadi trafik balasan harus lewat load
-balancer. Dengan DSR, backend menjawab langsung ke client dan LB hanya memproses arah masuk. Ini
-alasan utama orang memilih XDP untuk load balancing.
+**Penanganan MTU untuk DSR.** Enkapsulasi menambah 20 byte, dan paket yang sudah sebesar MTU akan
+melewatinya setelah dibungkus lalu dibuang driver tanpa jejak. Yang dibutuhkan bukan pemeriksaan MTU
+hardcoded di datapath — itu menanamkan asumsi angka — tapi MTU egress yang dibaca control plane dari
+interface dan ditulis ke map, plus counter khusus untuk paket yang ditolak karenanya.
 
 **CI multi-kernel.** CI sekarang menguji satu kernel saja, yaitu apa pun yang dipakai runner
 `ubuntu-24.04`. Klaim kompatibilitas kernel 5.15+ di README belum ada buktinya. Butuh `vmtest` atau

@@ -42,6 +42,10 @@ deps: ## Install build dependencies (Debian/Ubuntu)
 netns-up: ## Create the client/lb/backend network namespace test rig
 	sudo ./test/netns-setup.sh
 
+.PHONY: netns-dsr
+netns-dsr: ## Convert the running rig to direct server return
+	sudo ./test/netns-dsr.sh
+
 .PHONY: netns-down
 netns-down: ## Tear down the test rig
 	sudo ./test/netns-teardown.sh

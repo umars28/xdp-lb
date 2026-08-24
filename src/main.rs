@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use xdp_lb::{
-    config::{self, Config, Protocol},
+    config::{self, Config, Forwarding, Protocol},
     dataplane::DataPlane,
     drain::DrainList,
     health, maglev,
@@ -15,7 +15,7 @@ use xdp_lb::{
     neigh, object,
     types::{
         be16, be32, Backend, RateConfig, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE,
-        MODE_NAT, NO_BACKEND,
+        NO_BACKEND,
     },
     weights::PrometheusSource,
 };
@@ -73,6 +73,8 @@ struct ServiceSlot {
     vip: Ipv4Addr,
     port: u16,
     proto: Protocol,
+    forwarding: Forwarding,
+    dsr_source: Option<Ipv4Addr>,
     backends: Vec<BackendSlot>,
     table: Vec<u32>,
 }
@@ -283,6 +285,8 @@ fn build_slots(cfg: &Config) -> Vec<ServiceSlot> {
             vip: svc.vip,
             port: svc.port,
             proto: svc.protocol,
+            forwarding: svc.forwarding,
+            dsr_source: svc.dsr_source,
             backends,
             table: vec![NO_BACKEND; MAGLEV_SIZE as usize],
         });
@@ -302,7 +306,8 @@ fn publish_services(plane: &mut DataPlane, slots: &[ServiceSlot]) -> Result<()> 
             },
             ServiceInfo {
                 svc_id: slot.svc_id,
-                mode: MODE_NAT,
+                dsr_source: slot.dsr_source.map(be32).unwrap_or(0),
+                mode: slot.forwarding.as_u8(),
                 pad: [0; 3],
             },
         )?;
@@ -311,6 +316,7 @@ fn publish_services(plane: &mut DataPlane, slots: &[ServiceSlot]) -> Result<()> 
             vip = %slot.vip,
             port = slot.port,
             protocol = ?slot.proto,
+            forwarding = ?slot.forwarding,
             backends = slot.backends.len(),
             "service published to datapath"
         );

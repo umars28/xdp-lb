@@ -6,6 +6,7 @@ pub mod maglev;
 pub mod metrics;
 pub mod neigh;
 pub mod object;
+pub mod packet;
 pub mod progtest;
 pub mod types;
 pub mod weights;

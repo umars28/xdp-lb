@@ -6,6 +6,10 @@ use std::{
 use aya::{programs::Xdp, Ebpf};
 use xdp_lb::{
     dataplane::DataPlane,
+    packet::{
+        self, eth_dst, eth_src, ip_dst, ip_src, ones_complement, tcp_dst_port, tcp_src_port,
+        Endpoint, ETH_LEN, IP_LEN, PROTO_IPIP, PROTO_TCP,
+    },
     progtest::{self, XDP_DROP, XDP_PASS, XDP_TX},
     types::{
         be16, be32, Backend, RateConfig, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE,
@@ -22,15 +26,9 @@ const VIP: &str = "10.0.0.100";
 const BACKEND_IP: &str = "10.0.0.11";
 const DSR_SOURCE: &str = "10.0.0.1";
 
-const PROTO_IPIP: u8 = 4;
-
 const CLIENT_PORT: u16 = 40000;
 const VIP_PORT: u16 = 80;
 const BACKEND_PORT: u16 = 8080;
-
-const PROTO_TCP: u8 = 6;
-const ETH_LEN: usize = 14;
-const IP_LEN: usize = 20;
 
 struct Harness {
     _ebpf: Ebpf,
@@ -157,22 +155,6 @@ impl Harness {
     }
 }
 
-fn ones_complement(bytes: &[u8]) -> u16 {
-    let mut sum = 0u32;
-    let mut index = 0;
-    while index + 1 < bytes.len() {
-        sum += u16::from_be_bytes([bytes[index], bytes[index + 1]]) as u32;
-        index += 2;
-    }
-    if index < bytes.len() {
-        sum += (bytes[index] as u32) << 8;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
 fn tcp_packet(
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
@@ -181,99 +163,27 @@ fn tcp_packet(
     src_port: u16,
     dst_port: u16,
 ) -> Vec<u8> {
-    let payload_len = 20usize;
-    let total_len = IP_LEN + payload_len;
-
-    let mut packet = Vec::with_capacity(ETH_LEN + total_len);
-    packet.extend_from_slice(&dst_mac);
-    packet.extend_from_slice(&src_mac);
-    packet.extend_from_slice(&0x0800u16.to_be_bytes());
-
-    packet.push(0x45);
-    packet.push(0);
-    packet.extend_from_slice(&(total_len as u16).to_be_bytes());
-    packet.extend_from_slice(&0x1234u16.to_be_bytes());
-    packet.extend_from_slice(&0u16.to_be_bytes());
-    packet.push(64);
-    packet.push(PROTO_TCP);
-    packet.extend_from_slice(&0u16.to_be_bytes());
-    packet.extend_from_slice(&src_ip.octets());
-    packet.extend_from_slice(&dst_ip.octets());
-
-    let ip_csum = ones_complement(&packet[ETH_LEN..ETH_LEN + IP_LEN]);
-    packet[ETH_LEN + 10..ETH_LEN + 12].copy_from_slice(&ip_csum.to_be_bytes());
-
-    packet.extend_from_slice(&src_port.to_be_bytes());
-    packet.extend_from_slice(&dst_port.to_be_bytes());
-    packet.extend_from_slice(&1u32.to_be_bytes());
-    packet.extend_from_slice(&0u32.to_be_bytes());
-    packet.push(0x50);
-    packet.push(0x02);
-    packet.extend_from_slice(&64240u16.to_be_bytes());
-    packet.extend_from_slice(&0u16.to_be_bytes());
-    packet.extend_from_slice(&0u16.to_be_bytes());
-
-    let tcp_csum = tcp_checksum(&packet);
-    let offset = ETH_LEN + IP_LEN + 16;
-    packet[offset..offset + 2].copy_from_slice(&tcp_csum.to_be_bytes());
-
-    packet
-}
-
-fn tcp_checksum(packet: &[u8]) -> u16 {
-    let mut pseudo = Vec::new();
-    pseudo.extend_from_slice(&packet[ETH_LEN + 12..ETH_LEN + 20]);
-    pseudo.push(0);
-    pseudo.push(PROTO_TCP);
-    let tcp_len = (packet.len() - ETH_LEN - IP_LEN) as u16;
-    pseudo.extend_from_slice(&tcp_len.to_be_bytes());
-    pseudo.extend_from_slice(&packet[ETH_LEN + IP_LEN..]);
-    ones_complement(&pseudo)
-}
-
-fn eth_dst(packet: &[u8]) -> [u8; 6] {
-    packet[0..6].try_into().unwrap()
-}
-
-fn eth_src(packet: &[u8]) -> [u8; 6] {
-    packet[6..12].try_into().unwrap()
-}
-
-fn ip_src(packet: &[u8]) -> Ipv4Addr {
-    Ipv4Addr::new(
-        packet[ETH_LEN + 12],
-        packet[ETH_LEN + 13],
-        packet[ETH_LEN + 14],
-        packet[ETH_LEN + 15],
+    packet::tcp_syn(
+        Endpoint {
+            mac: src_mac,
+            address: src_ip,
+            port: src_port,
+        },
+        Endpoint {
+            mac: dst_mac,
+            address: dst_ip,
+            port: dst_port,
+        },
     )
 }
 
-fn ip_dst(packet: &[u8]) -> Ipv4Addr {
-    Ipv4Addr::new(
-        packet[ETH_LEN + 16],
-        packet[ETH_LEN + 17],
-        packet[ETH_LEN + 18],
-        packet[ETH_LEN + 19],
-    )
-}
-
-fn tcp_src_port(packet: &[u8]) -> u16 {
-    u16::from_be_bytes([packet[ETH_LEN + IP_LEN], packet[ETH_LEN + IP_LEN + 1]])
-}
-
-fn tcp_dst_port(packet: &[u8]) -> u16 {
-    u16::from_be_bytes([packet[ETH_LEN + IP_LEN + 2], packet[ETH_LEN + IP_LEN + 3]])
-}
-
-fn assert_checksums_valid(packet: &[u8]) {
-    assert_eq!(
-        ones_complement(&packet[ETH_LEN..ETH_LEN + IP_LEN]),
-        0,
+fn assert_checksums_valid(frame: &[u8]) {
+    assert!(
+        packet::ip_header_is_valid(frame),
         "IPv4 header checksum is wrong after rewrite"
     );
-    assert_eq!(
-        tcp_checksum(packet),
-        0,
+    assert!(
+        packet::tcp_checksum_is_valid(frame),
         "TCP checksum is wrong after rewrite"
     );
 }
@@ -316,10 +226,7 @@ fn packet_builder_produces_valid_checksums() {
 fn non_ipv4_frame_is_passed_to_the_stack() {
     let harness = Harness::load();
 
-    let mut arp = vec![0u8; 42];
-    arp[0..6].copy_from_slice(&LB_MAC);
-    arp[6..12].copy_from_slice(&CLIENT_MAC);
-    arp[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+    let arp = packet::arp_frame(CLIENT_MAC, LB_MAC);
 
     let outcome = harness.run(&arp);
     assert_eq!(
@@ -500,6 +407,32 @@ fn vip_traffic_is_dropped_when_no_backend_is_active() {
         outcome.verdict_name()
     );
     assert_eq!(harness.stat("no_backend"), 1);
+}
+
+#[test]
+#[ignore = "needs root"]
+fn prog_test_run_does_not_restore_the_packet_between_repeats() {
+    let mut harness = Harness::load();
+    harness.ready();
+
+    progtest::run(harness.program.as_fd(), &forward_packet(), 1000)
+        .expect("BPF_PROG_TEST_RUN must succeed");
+
+    assert_eq!(
+        harness.stat("conntrack_miss"),
+        1,
+        "only the first repeat should see a new flow"
+    );
+    assert_eq!(
+        harness.stat("conntrack_hit"),
+        0,
+        "later repeats see the rewritten packet, whose 5-tuple matches nothing"
+    );
+    assert_eq!(
+        harness.stat("pass"),
+        999,
+        "they fall through to the unknown-destination path instead"
+    );
 }
 
 #[test]

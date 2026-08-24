@@ -64,7 +64,7 @@ vm: ## Start the Lima Linux VM used for development from macOS
 
 .PHONY: shell
 shell: ## Open a shell in the Lima VM at the project directory
-	limactl shell $(VM) --workdir /Users/$$(whoami)/Documents/Portfolio/xdp-lb
+	limactl shell --workdir $(CURDIR) $(VM)
 
 .PHONY: clean
 clean:

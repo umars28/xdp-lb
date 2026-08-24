@@ -4,6 +4,7 @@ images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
     arch: "x86_64"
 
+vmType: "vz"
 cpus: 4
 memory: "4GiB"
 disk: "20GiB"
@@ -17,15 +18,16 @@ provision:
     script: |
       #!/bin/bash
       set -eux
+      export DEBIAN_FRONTEND=noninteractive
       apt-get update
-      apt-get install -y clang llvm libbpf-dev bpftool linux-headers-$(uname -r) \
-        build-essential pkg-config iproute2 iputils-ping python3 curl git \
-        linux-tools-common linux-tools-$(uname -r)
-      mount -t debugfs debugfs /sys/kernel/debug || true
+      apt-get install -y clang llvm libbpf-dev build-essential \
+        pkg-config iproute2 iputils-ping python3 curl git ethtool tcpdump
+      apt-get install -y "linux-tools-$(uname -r)" || apt-get install -y linux-tools-generic || true
+      mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
 
   - mode: user
     script: |
       #!/bin/bash
       set -eux
-      command -v cargo && exit 0
+      command -v cargo >/dev/null && exit 0
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal

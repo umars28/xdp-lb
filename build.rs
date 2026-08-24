@@ -16,10 +16,19 @@ fn main() {
     };
 
     let clang = env::var("CLANG").unwrap_or_else(|_| "clang".to_string());
-    let output = Command::new(&clang)
+    let mut command = Command::new(&clang);
+    command
         .args(["-O2", "-g", "-target", "bpf", "-Wall", "-Werror"])
         .arg(format!("-D__TARGET_ARCH_{bpf_arch}"))
-        .args(["-I", "bpf"])
+        .args(["-I", "bpf"]);
+
+    for dir in multiarch_include_dirs(&target_arch) {
+        if PathBuf::from(&dir).is_dir() {
+            command.arg(format!("-I{dir}"));
+        }
+    }
+
+    let output = command
         .arg("-c")
         .arg(source)
         .arg("-o")
@@ -35,4 +44,16 @@ fn main() {
     }
 
     println!("cargo:rustc-env=BPF_OBJECT={}", object.display());
+}
+
+fn multiarch_include_dirs(target_arch: &str) -> Vec<String> {
+    let triples = match target_arch {
+        "x86_64" => vec!["x86_64-linux-gnu", "x86_64-linux-musl"],
+        "aarch64" => vec!["aarch64-linux-gnu", "aarch64-linux-musl"],
+        _ => vec![],
+    };
+    triples
+        .into_iter()
+        .map(|triple| format!("/usr/include/{triple}"))
+        .collect()
 }

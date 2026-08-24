@@ -15,6 +15,8 @@
 #define MODE_NAT 0
 #define MODE_DSR 1
 
+#define MAX_RATE_BUCKETS 1048576
+
 enum stat_kind {
 	STAT_RX = 0,
 	STAT_TX,
@@ -23,7 +25,15 @@ enum stat_kind {
 	STAT_CT_HIT,
 	STAT_CT_MISS,
 	STAT_NO_BACKEND,
+	STAT_RATE_LIMITED,
 	__STAT_MAX,
+};
+
+struct rate_config {
+	__u64 interval_ns;
+	__u64 burst;
+	__u8 enabled;
+	__u8 pad[7];
 };
 
 struct service_key {

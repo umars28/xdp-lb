@@ -8,8 +8,8 @@ use xdp_lb::{
     dataplane::DataPlane,
     progtest::{self, XDP_DROP, XDP_PASS, XDP_TX},
     types::{
-        be16, be32, Backend, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE, MODE_NAT,
-        NO_BACKEND,
+        be16, be32, Backend, RateConfig, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE,
+        MODE_NAT, NO_BACKEND,
     },
 };
 
@@ -116,6 +116,12 @@ impl Harness {
         self.publish_service();
         self.publish_backend(BACKEND_ACTIVE);
         self.point_every_slot_at_backend_zero();
+    }
+
+    fn set_rate_limit(&mut self, config: RateConfig) {
+        self.plane
+            .put_rate_config(config)
+            .expect("rate config must be writable");
     }
 
     fn run(&self, packet: &[u8]) -> progtest::Outcome {
@@ -255,12 +261,16 @@ fn assert_checksums_valid(packet: &[u8]) {
 }
 
 fn forward_packet() -> Vec<u8> {
+    forward_packet_from(CLIENT_PORT)
+}
+
+fn forward_packet_from(source_port: u16) -> Vec<u8> {
     tcp_packet(
         CLIENT_MAC,
         LB_MAC,
         CLIENT_IP.parse().unwrap(),
         VIP.parse().unwrap(),
-        CLIENT_PORT,
+        source_port,
         VIP_PORT,
     )
 }
@@ -472,6 +482,106 @@ fn vip_traffic_is_dropped_when_no_backend_is_active() {
         outcome.verdict_name()
     );
     assert_eq!(harness.stat("no_backend"), 1);
+}
+
+#[test]
+#[ignore = "needs root"]
+fn rate_limiting_is_off_until_configured() {
+    let mut harness = Harness::load();
+    harness.ready();
+
+    for port in 0..32u16 {
+        let outcome = harness.run(&forward_packet_from(41000 + port));
+        assert_eq!(
+            outcome.verdict, XDP_TX,
+            "flow {port} was limited without any configuration"
+        );
+    }
+    assert_eq!(harness.stat("rate_limited"), 0);
+}
+
+#[test]
+#[ignore = "needs root"]
+fn rate_limiting_drops_new_flows_beyond_the_burst() {
+    let mut harness = Harness::load();
+    harness.ready();
+    harness.set_rate_limit(RateConfig::per_cpu(1, 1));
+
+    let first = harness.run(&forward_packet_from(42000));
+    assert_eq!(
+        first.verdict,
+        XDP_TX,
+        "the first flow spends the single burst token, got {}",
+        first.verdict_name()
+    );
+
+    let second = harness.run(&forward_packet_from(42001));
+    assert_eq!(
+        second.verdict,
+        XDP_DROP,
+        "the bucket is empty and one token per second has not elapsed, got {}",
+        second.verdict_name()
+    );
+    assert_eq!(harness.stat("rate_limited"), 1);
+}
+
+#[test]
+#[ignore = "needs root"]
+fn rate_limiting_never_touches_established_flows() {
+    let mut harness = Harness::load();
+    harness.ready();
+    harness.set_rate_limit(RateConfig::per_cpu(1, 1));
+
+    let packet = forward_packet_from(43000);
+    assert_eq!(harness.run(&packet).verdict, XDP_TX);
+
+    assert_eq!(
+        harness.run(&forward_packet_from(43001)).verdict,
+        XDP_DROP,
+        "the bucket must be empty by now"
+    );
+
+    for _ in 0..16 {
+        let outcome = harness.run(&packet);
+        assert_eq!(
+            outcome.verdict,
+            XDP_TX,
+            "an established flow must bypass the limiter, got {}",
+            outcome.verdict_name()
+        );
+    }
+    assert_eq!(
+        harness.stat("rate_limited"),
+        1,
+        "only the second new flow may be counted as limited"
+    );
+}
+
+#[test]
+#[ignore = "needs root"]
+fn rate_limiting_accounts_per_source_address() {
+    let mut harness = Harness::load();
+    harness.ready();
+    harness.set_rate_limit(RateConfig::per_cpu(1, 1));
+
+    assert_eq!(harness.run(&forward_packet_from(44000)).verdict, XDP_TX);
+    assert_eq!(harness.run(&forward_packet_from(44001)).verdict, XDP_DROP);
+
+    let other_client = tcp_packet(
+        CLIENT_MAC,
+        LB_MAC,
+        "10.1.0.11".parse().unwrap(),
+        VIP.parse().unwrap(),
+        44002,
+        VIP_PORT,
+    );
+    let outcome = harness.run(&other_client);
+    assert_eq!(
+        outcome.verdict,
+        XDP_TX,
+        "a different source must have its own bucket, got {}",
+        outcome.verdict_name()
+    );
 }
 
 #[test]

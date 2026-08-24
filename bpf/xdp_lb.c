@@ -39,6 +39,25 @@ struct {
 	__type(value, struct nat_entry);
 } conntrack SEC(".maps");
 
+struct rate_bucket {
+	__u64 tokens;
+	__u64 next_refill_ns;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct rate_config);
+} rate_config SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	__uint(max_entries, MAX_RATE_BUCKETS);
+	__type(key, __be32);
+	__type(value, struct rate_bucket);
+} rate_buckets SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, __STAT_MAX);
@@ -135,6 +154,42 @@ static __always_inline __u32 flow_hash(const struct flow_key *k)
 	c -= rol32(b, 24);
 
 	return c;
+}
+
+static __always_inline int new_flow_allowed(__be32 saddr, __u64 now)
+{
+	__u32 zero = 0;
+	struct rate_config *cfg = bpf_map_lookup_elem(&rate_config, &zero);
+
+	if (!cfg || !cfg->enabled || !cfg->interval_ns || !cfg->burst)
+		return 1;
+
+	struct rate_bucket *bucket = bpf_map_lookup_elem(&rate_buckets, &saddr);
+
+	if (!bucket) {
+		struct rate_bucket fresh = {};
+
+		fresh.tokens = cfg->burst - 1;
+		fresh.next_refill_ns = now + cfg->interval_ns;
+		bpf_map_update_elem(&rate_buckets, &saddr, &fresh, BPF_ANY);
+		return 1;
+	}
+
+	if (now >= bucket->next_refill_ns) {
+		__u64 gained = 1 + (now - bucket->next_refill_ns) / cfg->interval_ns;
+
+		bucket->tokens += gained;
+		if (bucket->tokens > cfg->burst)
+			bucket->tokens = cfg->burst;
+		bucket->next_refill_ns = now + cfg->interval_ns;
+	}
+
+	if (!bucket->tokens)
+		return 0;
+
+	bucket->tokens -= 1;
+
+	return 1;
 }
 
 static __always_inline int apply_nat(struct ethhdr *eth, struct iphdr *iph,
@@ -251,6 +306,13 @@ int xdp_lb(struct xdp_md *ctx)
 
 	stat_bump(STAT_CT_MISS, pkt_len);
 
+	__u64 now = bpf_ktime_get_ns();
+
+	if (!new_flow_allowed(iph->saddr, now)) {
+		stat_bump(STAT_RATE_LIMITED, pkt_len);
+		return XDP_DROP;
+	}
+
 	__u32 slot = svc->svc_id * MAGLEV_SIZE + (flow_hash(&fk) % MAGLEV_SIZE);
 	__u32 *chosen = bpf_map_lookup_elem(&maglev, &slot);
 
@@ -266,8 +328,6 @@ int xdp_lb(struct xdp_md *ctx)
 		stat_bump(STAT_NO_BACKEND, pkt_len);
 		return XDP_DROP;
 	}
-
-	__u64 now = bpf_ktime_get_ns();
 
 	struct nat_entry fwd = {};
 

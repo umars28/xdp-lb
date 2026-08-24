@@ -3,7 +3,7 @@ use std::{net::Ipv4Addr, path::Path};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::types::{MAGLEV_SIZE, MAX_BACKENDS, MAX_SERVICES};
+use crate::types::{MAGLEV_SIZE, MAX_BACKENDS, MAX_SERVICES, NANOS_PER_SECOND};
 
 const GOOD_DISTRIBUTION_RATIO: u32 = 8;
 
@@ -18,7 +18,41 @@ pub struct Config {
     pub health_timeout_ms: u64,
     #[serde(default)]
     pub weighting: Option<WeightingConfig>,
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
     pub services: Vec<ServiceConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct RateLimitConfig {
+    pub new_flows_per_second: u64,
+    #[serde(default)]
+    pub burst: Option<u64>,
+}
+
+impl RateLimitConfig {
+    pub fn burst_or_default(&self) -> u64 {
+        self.burst.unwrap_or(self.new_flows_per_second * 2)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.new_flows_per_second == 0 {
+            bail!(
+                "rate_limit.new_flows_per_second is 0, which would drop every new connection; \
+                 remove the rate_limit block to disable it instead"
+            );
+        }
+        if self.new_flows_per_second > NANOS_PER_SECOND {
+            bail!(
+                "rate_limit.new_flows_per_second ({}) exceeds one flow per nanosecond",
+                self.new_flows_per_second
+            );
+        }
+        if self.burst_or_default() == 0 {
+            bail!("rate_limit.burst is 0, which would drop every new connection");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -198,6 +232,10 @@ impl Config {
 
         if let Some(weighting) = &self.weighting {
             weighting.validate()?;
+        }
+
+        if let Some(rate_limit) = &self.rate_limit {
+            rate_limit.validate()?;
         }
 
         Ok(())

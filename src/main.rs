@@ -14,8 +14,8 @@ use xdp_lb::{
     metrics::{self, AppState, BackendSample, SharedSnapshot},
     neigh, object,
     types::{
-        be16, be32, Backend, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE, MODE_NAT,
-        NO_BACKEND,
+        be16, be32, Backend, RateConfig, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE,
+        MODE_NAT, NO_BACKEND,
     },
     weights::PrometheusSource,
 };
@@ -110,6 +110,28 @@ async fn main() -> Result<()> {
     let mut plane = DataPlane::attach_maps(&mut ebpf)?;
     let mut slots = build_slots(&cfg);
     publish_services(&mut plane, &slots)?;
+
+    let rate_config = match &cfg.rate_limit {
+        Some(limit) => {
+            let cpus = aya::util::nr_cpus().unwrap_or(1) as u64;
+            let config = RateConfig::spread_across(
+                cpus,
+                limit.new_flows_per_second,
+                limit.burst_or_default(),
+            );
+            info!(
+                new_flows_per_second = limit.new_flows_per_second,
+                burst = limit.burst_or_default(),
+                cpus,
+                per_cpu_interval_ns = config.interval_ns,
+                per_cpu_burst = config.burst,
+                "rate limiting new flows per source address"
+            );
+            config
+        }
+        None => RateConfig::disabled(),
+    };
+    plane.put_rate_config(rate_config)?;
 
     let drain = DrainList::seed(
         cfg.services

@@ -5,13 +5,14 @@ use aya::{
 };
 
 use crate::types::{
-    Backend, ServiceInfo, ServiceKey, StatVal, MAGLEV_SIZE, MAX_SERVICES, STAT_NAMES,
+    Backend, RateConfig, ServiceInfo, ServiceKey, StatVal, MAGLEV_SIZE, MAX_SERVICES, STAT_NAMES,
 };
 
 pub struct DataPlane {
     services: BpfHashMap<MapData, ServiceKey, ServiceInfo>,
     backends: Array<MapData, Backend>,
     maglev: Array<MapData, u32>,
+    rate_config: Array<MapData, RateConfig>,
     stats: PerCpuArray<MapData, StatVal>,
     backend_stats: PerCpuArray<MapData, StatVal>,
 }
@@ -22,9 +23,16 @@ impl DataPlane {
             services: BpfHashMap::try_from(take(ebpf, "services")?)?,
             backends: Array::try_from(take(ebpf, "backends")?)?,
             maglev: Array::try_from(take(ebpf, "maglev")?)?,
+            rate_config: Array::try_from(take(ebpf, "rate_config")?)?,
             stats: PerCpuArray::try_from(take(ebpf, "stats")?)?,
             backend_stats: PerCpuArray::try_from(take(ebpf, "backend_stats")?)?,
         })
+    }
+
+    pub fn put_rate_config(&mut self, config: RateConfig) -> Result<()> {
+        self.rate_config
+            .set(0, config, 0)
+            .context("writing rate_config map")
     }
 
     pub fn put_service(&mut self, key: ServiceKey, info: ServiceInfo) -> Result<()> {

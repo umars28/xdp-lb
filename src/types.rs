@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use aya::Pod;
 
 pub const MAX_BACKENDS: u32 = 4096;
@@ -58,3 +60,27 @@ unsafe impl Pod for ServiceKey {}
 unsafe impl Pod for ServiceInfo {}
 unsafe impl Pod for Backend {}
 unsafe impl Pod for StatVal {}
+
+pub fn be32(address: Ipv4Addr) -> u32 {
+    u32::from_ne_bytes(address.octets())
+}
+
+pub fn be16(port: u16) -> u16 {
+    u16::from_ne_bytes(port.to_be_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv4_is_written_in_network_order() {
+        let value = be32("1.2.3.4".parse().unwrap());
+        assert_eq!(value.to_ne_bytes(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn port_is_written_in_network_order() {
+        assert_eq!(be16(8080).to_ne_bytes(), [0x1f, 0x90]);
+    }
+}

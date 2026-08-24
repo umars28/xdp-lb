@@ -12,7 +12,10 @@ use xdp_lb::{
     health, maglev,
     metrics::{self, BackendSample, SharedSnapshot},
     neigh, object,
-    types::{Backend, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE, MODE_NAT, NO_BACKEND},
+    types::{
+        be16, be32, Backend, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE, MODE_NAT,
+        NO_BACKEND,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -337,14 +340,6 @@ fn update_snapshot(
     Ok(())
 }
 
-fn be32(address: Ipv4Addr) -> u32 {
-    u32::from_ne_bytes(address.octets())
-}
-
-fn be16(port: u16) -> u16 {
-    u16::from_ne_bytes(port.to_be_bytes())
-}
-
 fn bump_memlock() -> Result<()> {
     let limit = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
@@ -355,20 +350,4 @@ fn bump_memlock() -> Result<()> {
         warn!("could not raise RLIMIT_MEMLOCK; map allocation may fail on kernels below 5.11");
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ipv4_is_written_in_network_order() {
-        let value = be32("1.2.3.4".parse().unwrap());
-        assert_eq!(value.to_ne_bytes(), [1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn port_is_written_in_network_order() {
-        assert_eq!(be16(8080).to_ne_bytes(), [0x1f, 0x90]);
-    }
 }

@@ -17,6 +17,16 @@ release: ## Build datapath and control plane (release)
 test: ## Run control plane unit tests
 	$(CARGO) test
 
+.PHONY: test-datapath
+test-datapath: ## Run datapath tests through BPF_PROG_TEST_RUN (needs root)
+	$(CARGO) test --test datapath --no-run
+	sudo $$($(CARGO) test --test datapath --no-run --message-format=json 2>/dev/null \
+		| grep -o '"executable":"[^"]*datapath[^"]*"' | tail -1 | cut -d'"' -f4) \
+		--include-ignored --test-threads=1
+
+.PHONY: test-all
+test-all: test test-datapath ## Run every test
+
 .PHONY: lint
 lint: ## Run clippy and rustfmt checks
 	$(CARGO) clippy --all-targets -- -D warnings

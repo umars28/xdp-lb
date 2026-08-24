@@ -958,6 +958,7 @@ dependencies = [
  "anyhow",
  "axum",
  "aya",
+ "aya-obj",
  "clap",
  "libc",
  "serde",

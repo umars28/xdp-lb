@@ -37,7 +37,40 @@ ditulis ke BPF map. Datapath hanya membaca map.
 
 ## Status
 
-Sedang dikerjakan. Lihat `docs/ROADMAP.md`.
+Jalan end-to-end di rig network namespace. Yang sudah terbukti berjalan, bukan sekadar terkompilasi:
+
+```
+$ make smoke
+requests: 40
+  be2: 23
+  be1: 17
+  failed: 0
+
+$ sudo ./test/backend-down.sh be1     # backend mati
+$ REQUESTS=20 make smoke
+requests: 20
+  be2: 20
+  failed: 0                            # semua trafik pindah, nol koneksi gagal
+
+$ sudo ./test/backend-up.sh be1        # backend kembali
+$ REQUESTS=20 make smoke
+requests: 20
+  be2: 8
+  be1: 12
+```
+
+Counter dari datapath saat 40 koneksi tersebut:
+
+```
+xdplb_packets_total{verdict="conntrack_miss"}  40     # tepat satu per koneksi baru
+xdplb_packets_total{verdict="conntrack_hit"}  440     # paket lanjutan tidak menyentuh maglev
+xdplb_packets_total{verdict="drop"}             0
+```
+
+Isi map `conntrack` 80 entry untuk 40 koneksi — dua per koneksi, satu untuk tiap arah.
+
+Uji di kernel 6.8 (Ubuntu 24.04, aarch64), mode SKB di atas veth. Belum ada angka benchmark di NIC
+fisik, jadi belum ada klaim performa apa pun. Lihat `docs/ROADMAP.md`.
 
 ## Requirement
 

@@ -1,11 +1,3 @@
-mod config;
-mod dataplane;
-mod health;
-mod maglev;
-mod metrics;
-mod neigh;
-mod types;
-
 use std::{net::Ipv4Addr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
@@ -14,13 +6,13 @@ use clap::{Parser, ValueEnum};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::{
-    config::{Config, Protocol},
+use xdp_lb::{
+    config::{self, Config, Protocol},
     dataplane::DataPlane,
-    metrics::{BackendSample, SharedSnapshot},
-    types::{
-        Backend, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE, MODE_NAT, NO_BACKEND,
-    },
+    health, maglev,
+    metrics::{self, BackendSample, SharedSnapshot},
+    neigh, object,
+    types::{Backend, ServiceInfo, ServiceKey, BACKEND_ACTIVE, MAGLEV_SIZE, MODE_NAT, NO_BACKEND},
 };
 
 #[derive(Parser, Debug)]
@@ -88,8 +80,8 @@ async fn main() -> Result<()> {
 
     bump_memlock()?;
 
-    let mut ebpf = Ebpf::load(include_bytes!(env!("BPF_OBJECT")))
-        .context("loading the BPF object into the kernel")?;
+    let mut ebpf =
+        Ebpf::load(object::bytes()).context("loading the BPF object into the kernel")?;
 
     let program: &mut Xdp = ebpf
         .program_mut("xdp_lb")

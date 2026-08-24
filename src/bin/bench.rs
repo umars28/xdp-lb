@@ -162,6 +162,29 @@ fn row(scenario: &str, verdict: u32, raw: f64, overhead: f64) {
     );
 }
 
+fn scenario(
+    name: &str,
+    overhead: f64,
+    measure: impl FnOnce(&mut Bench) -> Result<(u32, f64)>,
+) -> Result<()> {
+    let mut bench = Bench::load()?;
+    let (verdict, raw) = measure(&mut bench)?;
+    row(name, verdict, raw, overhead);
+    Ok(())
+}
+
+fn varying_port(base: u16) -> impl FnMut(u32) -> Vec<u8> {
+    move |index| {
+        tcp_syn(
+            Endpoint {
+                port: base.wrapping_add((index % SAMPLES as u16 as u32) as u16),
+                ..CLIENT
+            },
+            VIP,
+        )
+    }
+}
+
 fn describe_environment() {
     println!("arch    {}", std::env::consts::ARCH);
     if let Ok(release) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
@@ -190,14 +213,16 @@ fn main() -> Result<()> {
     let forward = tcp_syn(CLIENT, VIP);
     let arp = arp_frame(CLIENT.mac, VIP.mac);
 
-    let mut probe = Bench::load()?;
-    probe.configure(MODE_NAT)?;
-    progtest::run(probe.program.as_fd(), &forward, 1000)?;
-    let (miss, hit, pass) = (
-        probe.stat("conntrack_miss")?,
-        probe.stat("conntrack_hit")?,
-        probe.stat("pass")?,
-    );
+    let (miss, hit, pass) = {
+        let mut probe = Bench::load()?;
+        probe.configure(MODE_NAT)?;
+        progtest::run(probe.program.as_fd(), &forward, 1000)?;
+        (
+            probe.stat("conntrack_miss")?,
+            probe.stat("conntrack_hit")?,
+            probe.stat("pass")?,
+        )
+    };
 
     println!("\nmethod");
     println!("  BPF_PROG_TEST_RUN does not restore the packet between its own repeats.");
@@ -212,9 +237,12 @@ fn main() -> Result<()> {
     println!("  of amortising the clock over a million. That overhead is calibrated on a path");
     println!("  that does not touch the packet, where both methods are valid, and subtracted.");
 
-    let calibrator = Bench::load()?;
-    let in_kernel = calibrator.in_kernel_loop(&arp)?;
-    let (_, per_call) = calibrator.per_call(|_| arp.clone())?;
+    let (in_kernel, per_call) = {
+        let calibrator = Bench::load()?;
+        let in_kernel = calibrator.in_kernel_loop(&arp)?;
+        let (_, per_call) = calibrator.per_call(|_| arp.clone())?;
+        (in_kernel, per_call)
+    };
     let overhead = (per_call - in_kernel).max(0.0);
 
     println!();
@@ -228,10 +256,6 @@ fn main() -> Result<()> {
     );
     println!("{}", "-".repeat(75));
 
-    let plain = Bench::load()?;
-    let (verdict, raw) = plain.per_call(|_| arp.clone())?;
-    row("non-ip frame, passed", verdict, raw, overhead);
-
     let stray = tcp_syn(
         CLIENT,
         Endpoint {
@@ -239,73 +263,55 @@ fn main() -> Result<()> {
             ..VIP
         },
     );
-    let (verdict, raw) = plain.per_call(|_| stray.clone())?;
-    row("unknown destination, passed", verdict, raw, overhead);
 
-    let mut nat = Bench::load()?;
-    nat.configure(MODE_NAT)?;
-    nat.once(&forward)?;
-    let (verdict, raw) = nat.per_call(|_| forward.clone())?;
-    row("nat, established flow", verdict, raw, overhead);
+    scenario("non-ip frame, passed", overhead, |bench| {
+        bench.per_call(|_| arp.clone())
+    })?;
 
-    let mut nat_cold = Bench::load()?;
-    nat_cold.configure(MODE_NAT)?;
-    let (verdict, raw) = nat_cold.per_call(|index| {
-        tcp_syn(
+    scenario("unknown destination, passed", overhead, |bench| {
+        bench.per_call(|_| stray.clone())
+    })?;
+
+    scenario("nat, established flow", overhead, |bench| {
+        bench.configure(MODE_NAT)?;
+        bench.once(&forward)?;
+        bench.per_call(|_| forward.clone())
+    })?;
+
+    scenario("nat, new flow", overhead, |bench| {
+        bench.configure(MODE_NAT)?;
+        bench.per_call(varying_port(1024))
+    })?;
+
+    scenario("dsr, established flow", overhead, |bench| {
+        bench.configure(MODE_DSR)?;
+        bench.once(&forward)?;
+        bench.per_call(|_| forward.clone())
+    })?;
+
+    scenario("dsr, new flow", overhead, |bench| {
+        bench.configure(MODE_DSR)?;
+        bench.per_call(varying_port(1024))
+    })?;
+
+    scenario("no backend, dropped", overhead, |bench| {
+        bench.configure(MODE_NAT)?;
+        bench.empty_table()?;
+        bench.per_call(varying_port(1024))
+    })?;
+
+    scenario("rate limited, dropped", overhead, |bench| {
+        bench.configure(MODE_NAT)?;
+        bench.rate_limit(RateConfig::per_cpu(1, 1))?;
+        bench.once(&tcp_syn(
             Endpoint {
-                port: 1024u16.wrapping_add((index % 60000) as u16),
+                port: 9999,
                 ..CLIENT
             },
             VIP,
-        )
+        ))?;
+        bench.per_call(varying_port(20000))
     })?;
-    row("nat, new flow", verdict, raw, overhead);
-
-    let mut dsr = Bench::load()?;
-    dsr.configure(MODE_DSR)?;
-    dsr.once(&forward)?;
-    let (verdict, raw) = dsr.per_call(|_| forward.clone())?;
-    row("dsr, established flow", verdict, raw, overhead);
-
-    let mut dsr_cold = Bench::load()?;
-    dsr_cold.configure(MODE_DSR)?;
-    let (verdict, raw) = dsr_cold.per_call(|index| {
-        tcp_syn(
-            Endpoint {
-                port: 1024u16.wrapping_add((index % 60000) as u16),
-                ..CLIENT
-            },
-            VIP,
-        )
-    })?;
-    row("dsr, new flow", verdict, raw, overhead);
-
-    let mut dropper = Bench::load()?;
-    dropper.configure(MODE_NAT)?;
-    dropper.empty_table()?;
-    let (verdict, raw) = dropper.per_call(|_| forward.clone())?;
-    row("no backend, dropped", verdict, raw, overhead);
-
-    let mut limited = Bench::load()?;
-    limited.configure(MODE_NAT)?;
-    limited.rate_limit(RateConfig::per_cpu(1, 1))?;
-    limited.once(&tcp_syn(
-        Endpoint {
-            port: 9999,
-            ..CLIENT
-        },
-        VIP,
-    ))?;
-    let (verdict, raw) = limited.per_call(|index| {
-        tcp_syn(
-            Endpoint {
-                port: 20000u16.wrapping_add((index % 40000) as u16),
-                ..CLIENT
-            },
-            VIP,
-        )
-    })?;
-    row("rate limited, dropped", verdict, raw, overhead);
 
     println!("\nMpkt/s/core is one second divided by net ns: the ceiling this datapath puts");
     println!("on a single core. It is not a throughput measurement of any real system —");

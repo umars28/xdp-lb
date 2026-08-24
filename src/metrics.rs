@@ -54,19 +54,36 @@ async fn render(State(snapshot): State<SharedSnapshot>) -> impl IntoResponse {
 
     let mut body = String::with_capacity(4096);
 
-    let _ = writeln!(body, "# HELP xdplb_packets_total Packets counted by the datapath.");
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_packets_total Packets counted by the datapath."
+    );
     let _ = writeln!(body, "# TYPE xdplb_packets_total counter");
     for (name, value) in &snapshot.global {
-        let _ = writeln!(body, "xdplb_packets_total{{verdict=\"{name}\"}} {}", value.packets);
+        let _ = writeln!(
+            body,
+            "xdplb_packets_total{{verdict=\"{name}\"}} {}",
+            value.packets
+        );
     }
 
-    let _ = writeln!(body, "# HELP xdplb_bytes_total Bytes counted by the datapath.");
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_bytes_total Bytes counted by the datapath."
+    );
     let _ = writeln!(body, "# TYPE xdplb_bytes_total counter");
     for (name, value) in &snapshot.global {
-        let _ = writeln!(body, "xdplb_bytes_total{{verdict=\"{name}\"}} {}", value.bytes);
+        let _ = writeln!(
+            body,
+            "xdplb_bytes_total{{verdict=\"{name}\"}} {}",
+            value.bytes
+        );
     }
 
-    let _ = writeln!(body, "# HELP xdplb_backend_packets_total Packets forwarded per backend.");
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_backend_packets_total Packets forwarded per backend."
+    );
     let _ = writeln!(body, "# TYPE xdplb_backend_packets_total counter");
     for sample in &snapshot.backends {
         let _ = writeln!(
@@ -76,7 +93,10 @@ async fn render(State(snapshot): State<SharedSnapshot>) -> impl IntoResponse {
         );
     }
 
-    let _ = writeln!(body, "# HELP xdplb_backend_up Backend health as observed by the control plane.");
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_backend_up Backend health as observed by the control plane."
+    );
     let _ = writeln!(body, "# TYPE xdplb_backend_up gauge");
     for sample in &snapshot.backends {
         let _ = writeln!(
@@ -88,7 +108,10 @@ async fn render(State(snapshot): State<SharedSnapshot>) -> impl IntoResponse {
         );
     }
 
-    let _ = writeln!(body, "# HELP xdplb_backend_weight Weight used to build the maglev table.");
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_backend_weight Weight used to build the maglev table."
+    );
     let _ = writeln!(body, "# TYPE xdplb_backend_weight gauge");
     for sample in &snapshot.backends {
         let _ = writeln!(
@@ -98,13 +121,23 @@ async fn render(State(snapshot): State<SharedSnapshot>) -> impl IntoResponse {
         );
     }
 
-    let _ = writeln!(body, "# HELP xdplb_reconcile_total Control plane reconcile loops completed.");
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_reconcile_total Control plane reconcile loops completed."
+    );
     let _ = writeln!(body, "# TYPE xdplb_reconcile_total counter");
     let _ = writeln!(body, "xdplb_reconcile_total {}", snapshot.reconcile_count);
 
-    let _ = writeln!(body, "# HELP xdplb_table_rebuild_total Maglev tables written to the datapath.");
+    let _ = writeln!(
+        body,
+        "# HELP xdplb_table_rebuild_total Maglev tables written to the datapath."
+    );
     let _ = writeln!(body, "# TYPE xdplb_table_rebuild_total counter");
-    let _ = writeln!(body, "xdplb_table_rebuild_total {}", snapshot.table_rebuild_count);
+    let _ = writeln!(
+        body,
+        "xdplb_table_rebuild_total {}",
+        snapshot.table_rebuild_count
+    );
 
     (StatusCode::OK, body)
 }

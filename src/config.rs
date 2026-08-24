@@ -119,9 +119,8 @@ impl Config {
                     );
                 }
                 if let Some(mac) = &be.mac {
-                    parse_mac(mac).with_context(|| {
-                        format!("service {} backend {}", svc.name, be.address)
-                    })?;
+                    parse_mac(mac)
+                        .with_context(|| format!("service {} backend {}", svc.name, be.address))?;
                 }
             }
         }

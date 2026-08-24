@@ -76,12 +76,14 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg = Config::load(&cli.config)?;
-    let interface = cli.interface.clone().unwrap_or_else(|| cfg.interface.clone());
+    let interface = cli
+        .interface
+        .clone()
+        .unwrap_or_else(|| cfg.interface.clone());
 
     bump_memlock()?;
 
-    let mut ebpf =
-        Ebpf::load(object::bytes()).context("loading the BPF object into the kernel")?;
+    let mut ebpf = Ebpf::load(object::bytes()).context("loading the BPF object into the kernel")?;
 
     let program: &mut Xdp = ebpf
         .program_mut("xdp_lb")
@@ -204,7 +206,11 @@ async fn probe_all(slots: &mut [ServiceSlot], timeout: Duration) {
             let address = backend.address;
             let port = backend.port;
             probes.spawn(async move {
-                (svc_pos, be_pos, health::probe_tcp(address, port, timeout).await)
+                (
+                    svc_pos,
+                    be_pos,
+                    health::probe_tcp(address, port, timeout).await,
+                )
             });
         }
     }

@@ -62,9 +62,14 @@ fn strip_dwarf(object: &PathBuf) {
         candidates.push(explicit);
     }
     candidates.extend(
-        ["llvm-strip", "llvm-strip-18", "llvm-strip-17", "llvm-strip-16"]
-            .into_iter()
-            .map(String::from),
+        [
+            "llvm-strip",
+            "llvm-strip-18",
+            "llvm-strip-17",
+            "llvm-strip-16",
+        ]
+        .into_iter()
+        .map(String::from),
     );
 
     for candidate in &candidates {

@@ -40,7 +40,8 @@ fn lookup(table: &str, address: Ipv4Addr, interface: &str) -> Option<[u8; 6]> {
 mod tests {
     use super::*;
 
-    const TABLE: &str = "IP address       HW type     Flags       HW address            Mask     Device
+    const TABLE: &str =
+        "IP address       HW type     Flags       HW address            Mask     Device
 10.0.0.11        0x1         0x2         aa:bb:cc:00:00:11     *        eth0
 10.0.0.12        0x1         0x0         00:00:00:00:00:00     *        eth0
 10.0.0.13        0x1         0x2         aa:bb:cc:00:00:13     *        eth1

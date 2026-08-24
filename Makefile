@@ -27,6 +27,11 @@ test-datapath: ## Run datapath tests through BPF_PROG_TEST_RUN (needs root)
 .PHONY: test-all
 test-all: test test-datapath ## Run every test
 
+.PHONY: bench
+bench: ## Measure datapath cost per packet (needs root)
+	$(CARGO) build --release --bin bench
+	sudo ./target/release/bench
+
 .PHONY: lint
 lint: ## Run clippy and rustfmt checks
 	$(CARGO) clippy --all-targets -- -D warnings

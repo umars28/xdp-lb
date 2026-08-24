@@ -42,6 +42,8 @@ ip -n client route add default via 10.0.0.1
 ip -n client neigh replace 10.0.0.1 lladdr "$LB_MAC" dev eth0
 ip -n client neigh replace "$VIP" lladdr "$LB_MAC" dev eth0
 
+ip -n lb route add 10.1.0.0/24 dev eth0
+
 for ns in be1 be2; do
 	ip -n "$ns" route replace default via 10.0.0.1
 done
@@ -52,7 +54,8 @@ done
 
 : >"$PIDFILE"
 for ns in be1 be2; do
-	ip netns exec "$ns" python3 "$HERE/backend.py" "$ns" "$BACKEND_PORT" &
+	setsid ip netns exec "$ns" python3 "$HERE/backend.py" "$ns" "$BACKEND_PORT" \
+		</dev/null >"/tmp/xdp-lb-$ns.log" 2>&1 &
 	echo $! >>"$PIDFILE"
 done
 

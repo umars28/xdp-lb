@@ -18,7 +18,15 @@ fn main() {
     let clang = env::var("CLANG").unwrap_or_else(|_| "clang".to_string());
     let mut command = Command::new(&clang);
     command
-        .args(["-O2", "-g", "-target", "bpf", "-Wall", "-Werror"])
+        .args([
+            "-O2",
+            "-g",
+            "-target",
+            "bpf",
+            "-fno-addrsig",
+            "-Wall",
+            "-Werror",
+        ])
         .arg(format!("-D__TARGET_ARCH_{bpf_arch}"))
         .args(["-I", "bpf"]);
 
@@ -43,7 +51,38 @@ fn main() {
         );
     }
 
+    strip_dwarf(&object);
+
     println!("cargo:rustc-env=BPF_OBJECT={}", object.display());
+}
+
+fn strip_dwarf(object: &PathBuf) {
+    let mut candidates = Vec::new();
+    if let Ok(explicit) = env::var("LLVM_STRIP") {
+        candidates.push(explicit);
+    }
+    candidates.extend(
+        ["llvm-strip", "llvm-strip-18", "llvm-strip-17", "llvm-strip-16"]
+            .into_iter()
+            .map(String::from),
+    );
+
+    for candidate in &candidates {
+        match Command::new(candidate).arg("-g").arg(object).output() {
+            Ok(output) if output.status.success() => return,
+            Ok(output) => panic!(
+                "{candidate} failed to strip {}:\n{}",
+                object.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(_) => continue,
+        }
+    }
+
+    panic!(
+        "no llvm-strip found (tried {}); DWARF sections must be removed or the loader cannot parse the object",
+        candidates.join(", ")
+    );
 }
 
 fn multiarch_include_dirs(target_arch: &str) -> Vec<String> {

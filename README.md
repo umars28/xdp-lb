@@ -120,6 +120,18 @@ requests: 20 ... failed: 0
 Dan itu meskipun DSR *menambah* 20 byte enkapsulasi per paket arah masuk. Bahwa balasan benar-benar
 tidak lewat LB diverifikasi tiga cara terpisah — lihat `docs/FORWARDING.md`.
 
+**Biaya datapath per paket** — median 5 run, dua arsitektur (`make bench`):
+
+| | aarch64 | x86_64 |
+| --- | --- | --- |
+| flow berjalan (NAT) | 68 ns | 160 ns |
+| flow baru (NAT) | 413 ns | 734 ns |
+| flow baru (DSR) | 284 ns | 509 ns |
+| selisih DSR vs NAT untuk flow baru | **−31%** | **−31%** |
+
+Angka −31% yang identik di dua CPU yang sangat berbeda bukan kebetulan pengukuran: NAT menulis dua
+entry conntrack, DSR hanya satu. Detail metode dan batasannya di `docs/BENCHMARK.md`.
+
 Counter datapath saat 40 koneksi (mode NAT):
 
 ```
@@ -165,8 +177,9 @@ untuk sekarang ini batasan yang didokumentasikan, bukan asumsi tersembunyi.
 yang dikonfigurasi ketika trafik menyebar rata antar CPU, dan lebih ketat ketika menumpuk di satu
 CPU. Ini pertukaran yang disengaja; alasannya ada di `docs/NOTES.md`.
 
-**Diuji di satu kernel.** Kernel 6.8 di aarch64. Klaim kompatibilitas ke bawah belum ada buktinya
-sampai CI multi-kernel jalan.
+**Diuji di dua arsitektur, satu versi kernel.** aarch64 kernel 6.8.0-137 dan x86_64 kernel 6.8.0-49
+— 52 test control plane dan 17 test datapath lolos di keduanya. Klaim kompatibilitas ke kernel yang
+lebih lama belum ada buktinya sampai CI multi-kernel jalan.
 
 ## Requirement
 

@@ -63,50 +63,86 @@ Setelah dikurangkan, jalur non-IP kembali ke 11 ns — kalibrasinya konsisten de
 
 ## Hasil
 
-### aarch64, kernel 6.8.0-137, 4 core (Lima VM di Apple Silicon)
+Semua angka median dari 5 run, dengan rentang min-maks di dalam tanda kurung. Median dipakai, bukan
+rata-rata, karena satu lingkungan menghasilkan outlier ekstrem — penjelasannya di bawah tabel.
 
-| Skenario | Verdict | ns/paket | Mpkt/s/core |
-| --- | --- | --- | --- |
-| non-ip frame, diteruskan | PASS | 11 | 91,5 |
-| destinasi tak dikenal, diteruskan | PASS | 37 | 27,3 |
-| nat, flow berjalan | TX | 67 | 14,9 |
-| dsr, flow berjalan | TX | 72 | 13,8 |
-| tanpa backend, di-drop | DROP | 86 | 11,6 |
-| rate limited, di-drop | DROP | 271 | 3,7 |
-| nat, flow baru | TX | 475 | 2,1 |
-| dsr, flow baru | TX | 328 | 3,1 |
+| Skenario | aarch64 (ns) | x86_64 (ns) |
+| --- | --- | --- |
+| non-ip frame, diteruskan | **11** (8–16) | **34** (22–64) |
+| destinasi tak dikenal, diteruskan | **35** (29–37) | **99** (88–137) |
+| nat, flow berjalan | **68** (61–72) | **160** (150–193) |
+| dsr, flow berjalan | **68** (64–73) | **169** (150–1713) |
+| rate limited, di-drop | **215** (195–303) | **336** (301–429) |
+| tanpa backend, di-drop | **220** (207–254) | **322** (278–421) |
+| dsr, flow baru | **284** (245–329) | **509** (457–1997) |
+| nat, flow baru | **413** (392–514) | **734** (714–2220) |
+
+**aarch64** — kernel 6.8.0-137, 4 core, Lima VM di Apple Silicon. `steal` nol sebelum dan sesudah
+pengujian. Rentangnya rapat: maks/min sekitar 1,3–1,6×.
+
+**x86_64** — kernel 6.8.0-49, 1 vCPU, Intel Xeon Platinum 8176 @ 2.10 GHz, VPS. **Lingkungan ini
+tidak layak untuk mengukur performa** dan angkanya hanya indikatif. `steal` naik 21772 → 25818 tick
+selama pengujian, sekitar 40 detik CPU yang dirampas hypervisor. Akibatnya tiap run punya satu
+outlier 4–12× di posisi yang berbeda-beda:
+
+```
+run 1: dsr flow baru    = 1997 ns   (median 509)
+run 2: dsr flow berjalan = 1713 ns  (median 169)
+run 3: nat flow baru    = 2220 ns   (median 734)
+```
+
+Nilai mediannya tetap konsisten, jadi tabel di atas masih berguna untuk melihat **urutan dan rasio**
+antar skenario. Nilai absolutnya dari kolom x86_64 sebaiknya tidak dikutip.
 
 ## Yang bisa dibaca dari angka ini
 
-**Flow berjalan jauh lebih murah daripada flow baru** — 67 ns lawan 475 ns untuk NAT, selisih tujuh
-kali. Ini alasan conntrack ada. Dari pengukuran trafik nyata sebelumnya, 440 dari 480 paket adalah
-conntrack hit, jadi jalur murah itu yang mendominasi. Kalau maglev dihitung ulang tiap paket, biaya
-rata-rata akan naik hampir sepuluh kali.
+**Flow berjalan jauh lebih murah daripada flow baru.** Di aarch64, 68 ns lawan 413 ns untuk NAT —
+enam kali. Di x86_64, 160 lawan 734 — 4,6 kali. Ini alasan conntrack ada. Dari pengukuran trafik
+nyata sebelumnya, 440 dari 480 paket adalah conntrack hit, jadi jalur murah itu yang mendominasi
+beban sesungguhnya.
 
-**DSR lebih mahal per paket di jalur berjalan** (72 lawan 67 ns) tapi **lebih murah di jalur flow
-baru** (328 lawan 475 ns). Yang kedua bukan kejutan kalau desainnya diingat: NAT menulis dua entry
-conntrack, satu untuk tiap arah, sementara DSR hanya menulis satu karena balasan tidak akan pernah
-lewat load balancer. Selisih 147 ns itu kira-kira harga satu insert ke LRU hash — dan itu sekaligus
-validasi silang bahwa yang diukur benar-benar jalur yang dimaksud.
+**DSR memotong 31% biaya pembentukan flow baru, dan angkanya identik di dua arsitektur.**
 
-Perlu diingat: keunggulan DSR yang sebenarnya bukan di biaya per paket, tapi di **jumlah paket yang
-harus diproses sama sekali**. Diukur di rig netns, DSR memotong 42% paket dan 47% byte dari beban LB
-untuk beban kerja yang sama. Lihat `docs/FORWARDING.md`.
+| | aarch64 | x86_64 |
+| --- | --- | --- |
+| nat, flow baru | 413 ns | 734 ns |
+| dsr, flow baru | 284 ns | 509 ns |
+| selisih | **−31%** | **−31%** |
 
-**Rate limiting mahal** (271 ns) dibanding drop biasa (86 ns). Selisihnya adalah lookup dan update ke
-LRU per-CPU hash. Ini pertukaran yang wajar untuk mekanisme pertahanan yang hanya aktif di pembentukan
-flow baru, bukan di tiap paket — tapi bukan sesuatu yang gratis, dan itulah sebabnya rate limiting
-mati secara default.
+Bahwa dua CPU yang sangat berbeda menghasilkan persentase yang sama membuat ini bukan kebetulan
+pengukuran. Dan penyebabnya bisa ditunjuk di kode: NAT menulis **dua** entry conntrack, satu untuk
+tiap arah, sementara DSR hanya menulis **satu** karena balasan tidak akan pernah lewat load balancer.
+Selisihnya adalah harga satu insert ke LRU hash.
 
-**Jalur PASS murah** (11 ns untuk non-IP, 37 ns setelah parsing penuh). Ini penting karena trafik yang
-tidak ditujukan ke VIP mana pun tetap harus melewati program ini. Biaya yang dibebankan XDP pada
-trafik yang tidak berkepentingan mendekati nol.
+**Untuk flow yang sudah berjalan, DSR dan NAT tidak terbedakan.** Keduanya 68 ns di aarch64; di
+x86_64 selisihnya 160 lawan 169 ns, di dalam noise lingkungan itu. Pengukuran satu run sebelumnya
+sempat menunjukkan DSR lebih mahal, tapi itu tidak bertahan di median lima run. Secara intuitif DSR
+seharusnya lebih mahal — ia menambah header dan menghitung checksum penuh — tapi metode ini tidak
+punya resolusi untuk membuktikannya.
+
+Keunggulan DSR yang sebenarnya juga bukan di sini, melainkan di **jumlah paket yang harus diproses
+sama sekali**: 42% lebih sedikit paket dan 47% lebih sedikit byte untuk beban kerja yang sama. Lihat
+`docs/FORWARDING.md`.
+
+**Jalur PASS murah** — 11 ns untuk frame non-IP, 35 ns setelah parsing penuh. Ini penting karena
+seluruh trafik yang tidak ditujukan ke VIP mana pun tetap harus melewati program ini. Biaya yang
+dibebankan pada trafik yang tidak berkepentingan mendekati nol, dan itu prasyarat untuk memasang XDP
+di interface produksi tanpa merugikan trafik lain.
+
+**Rate limiting tidak gratis** — 215 ns, sekitar tiga kali biaya jalur flow berjalan. Selisihnya
+lookup dan update ke LRU per-CPU hash. Wajar untuk mekanisme pertahanan yang hanya aktif saat
+pembentukan flow baru, tapi cukup mahal untuk menjelaskan kenapa defaultnya mati.
 
 ## Batasan yang jujur
 
-- Semua angka dari VM, bukan bare-metal. Biaya absolutnya akan berbeda di perangkat lain; yang lebih
-  bisa dipegang adalah **rasio antar skenario**, bukan nilai mutlaknya.
-- Metode kalibrasi mengasumsikan biaya tambahan per panggilan konstan antar skenario. Itu wajar
-  karena biaya tersebut ada di kernel di luar program, tapi tetap sebuah asumsi.
-- Belum ada perbandingan dengan nginx atau IPVS. Itu pekerjaan yang berbeda dan butuh perangkat yang
-  berbeda.
+- **Tidak ada bare-metal.** Keduanya VM. Biaya absolutnya akan berbeda di perangkat lain; yang bisa
+  dipegang adalah rasio antar skenario, yang terbukti konsisten di dua arsitektur.
+- **Nilai di bawah ~35 ns ada di batas resolusi metode ini.** Rentang 8–16 ns untuk jalur non-IP
+  berarti selisih beberapa nanosekon tidak bisa dibedakan dari noise.
+- **Kalibrasi mengasumsikan biaya tambahan per panggilan konstan** antar skenario. Wajar karena biaya
+  itu ada di kernel di luar program, tapi tetap sebuah asumsi.
+- **Angka sensitif terhadap lokalitas key.** Skenario drop awalnya diukur dengan paket yang sama
+  berulang, sehingga lookup conntrack-nya selalu cache-hot, dan hasilnya 86 ns. Dengan port sumber
+  yang bervariasi seperti flow baru sungguhan, angkanya 220 ns. Yang kedua yang dipakai.
+- **Belum ada perbandingan dengan nginx atau IPVS.** Itu pekerjaan berbeda: butuh dua mesin
+  bare-metal, satu untuk membangkitkan trafik dan satu untuk diuji.

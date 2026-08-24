@@ -107,3 +107,70 @@ jobs:
       - name: Tear down
         if: always()
         run: sudo ./test/netns-teardown.sh
+
+  dsr:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install BPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev iproute2 curl
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Bring up the rig and convert it to direct server return
+        run: |
+          sudo ./test/netns-setup.sh
+          sudo ./test/netns-dsr.sh
+
+      - name: Attach the load balancer in dsr mode
+        run: |
+          sudo setsid ip netns exec lb ./target/debug/xdp-lb \
+            --config test/config.dsr.yaml </dev/null >/tmp/xdp-lb.log 2>&1 &
+          for _ in $(seq 30); do
+            grep -q "maglev table rebuilt" /tmp/xdp-lb.log && exit 0
+            sleep 1
+          done
+          echo "load balancer never became ready"
+          cat /tmp/xdp-lb.log
+          exit 1
+
+      - name: Traffic through the VIP
+        run: sudo REQUESTS=30 ./test/smoke.sh
+
+      - name: Backends decapsulated IPIP and never encapsulated a reply
+        run: |
+          sudo ip -n be1 -s link show ipip0
+          rx=$(sudo ip netns exec be1 cat /sys/class/net/ipip0/statistics/rx_packets)
+          tx=$(sudo ip netns exec be1 cat /sys/class/net/ipip0/statistics/tx_packets)
+          echo "ipip0 rx=$rx tx=$tx"
+          test "$rx" -gt 0
+          test "$tx" -eq 0
+
+      - name: No VIP-sourced packet reached the load balancer
+        run: |
+          sudo timeout 8 ip netns exec lb tcpdump -ni eth0 -w /tmp/lb.pcap "src 10.0.0.100" &
+          sleep 2
+          sudo REQUESTS=10 ./test/smoke.sh
+          sleep 6
+          count=$(sudo tcpdump -r /tmp/lb.pcap 2>/dev/null | wc -l)
+          echo "packets with source VIP seen at the load balancer: $count"
+          test "$count" -eq 0
+
+      - name: Datapath counters
+        run: sudo ip netns exec lb curl -s localhost:9500/metrics | grep xdplb_
+
+      - name: Control plane log
+        if: always()
+        run: cat /tmp/xdp-lb.log
+
+      - name: Tear down
+        if: always()
+        run: sudo ./test/netns-teardown.sh

@@ -1,0 +1,24 @@
+[package]
+name = "xdp-lb"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+description = "L4 load balancer on the XDP hook with a Rust control plane"
+
+[dependencies]
+anyhow = "1"
+aya = "0.13"
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

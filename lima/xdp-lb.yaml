@@ -1,0 +1,31 @@
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+
+cpus: 4
+memory: "4GiB"
+disk: "20GiB"
+
+mounts:
+  - location: "~/Documents/Portfolio/xdp-lb"
+    writable: true
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      apt-get update
+      apt-get install -y clang llvm libbpf-dev bpftool linux-headers-$(uname -r) \
+        build-essential pkg-config iproute2 iputils-ping python3 curl git \
+        linux-tools-common linux-tools-$(uname -r)
+      mount -t debugfs debugfs /sys/kernel/debug || true
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux
+      command -v cargo && exit 0
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal

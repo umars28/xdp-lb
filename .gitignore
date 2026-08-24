@@ -1,0 +1,6 @@
+/target
+**/*.o
+bpf/vmlinux.h
+*.log
+.DS_Store
+config.yaml

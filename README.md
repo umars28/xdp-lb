@@ -20,6 +20,8 @@ programming model yang jauh lebih terbatas.
                       │  health check ──┐           │
                       │  maglev table ──┤           │
                       │  ARP resolve  ──┤           │
+                      │  prom weights ──┤           │
+                      │  drain API    ──┤           │
                       │  /metrics     ←─┘           │
                       └──────────┬──────────────────┘
                                  │ BPF maps
@@ -27,17 +29,35 @@ programming model yang jauh lebih terbatas.
    NIC ──▶ XDP hook ──▶ ┌──────────────────────┐ ──▶ XDP_TX ──▶ backend
                         │  datapath (C)        │
                         │  parse → conntrack   │ ──▶ XDP_PASS ──▶ kernel stack
-                        │  → maglev → NAT      │
-                        └──────────────────────┘ ──▶ XDP_DROP
+                        │  → rate limit        │
+                        │  → maglev → NAT      │ ──▶ XDP_DROP
+                        └──────────────────────┘
 ```
 
 Datapath tidak pernah mengambil keputusan yang butuh I/O. Semua keputusan yang butuh state
 eksternal — backend mana yang sehat, bobot berapa, MAC address apa — dihitung di control plane dan
 ditulis ke BPF map. Datapath hanya membaca map.
 
+Konsekuensi desain ini: serumit apa pun logika di control plane, biaya per paket tetap sama. Bobot
+yang mengikuti utilisasi CPU backend secara real-time tetap berujung pada satu lookup array di
+datapath.
+
+## Fitur
+
+| | |
+| --- | --- |
+| Pemilihan backend | Maglev consistent hashing dengan bobot |
+| Persistensi flow | Conntrack LRU dua arah, satu juta entry |
+| Mode forwarding | NAT (DNAT masuk, SNAT balik), keduanya di satu program XDP |
+| Health check | TCP connect aktif, paralel, dengan timeout |
+| Bobot dinamis | Query PromQL ke Prometheus/Mimir, mode `proportional` atau `inverse` |
+| Graceful drain | `POST /drain` — flow baru berhenti, flow lama diselesaikan |
+| Rate limiting | Token bucket per alamat sumber, hanya pada pembentukan flow baru |
+| Observability | Metrik Prometheus dari counter per-CPU dan per-backend |
+
 ## Status
 
-Jalan end-to-end di rig network namespace. Yang sudah terbukti berjalan, bukan sekadar terkompilasi:
+Jalan end-to-end. Yang berikut ini terukur, bukan diklaim:
 
 ```
 $ make smoke
@@ -45,21 +65,52 @@ requests: 40
   be2: 23
   be1: 17
   failed: 0
+```
 
-$ sudo ./test/backend-down.sh be1     # backend mati
+**Failover** — backend mati, trafik pindah, nol koneksi gagal:
+
+```
+$ sudo ./test/backend-down.sh be1
 $ REQUESTS=20 make smoke
 requests: 20
   be2: 20
-  failed: 0                            # semua trafik pindah, nol koneksi gagal
-
-$ sudo ./test/backend-up.sh be1        # backend kembali
-$ REQUESTS=20 make smoke
-requests: 20
-  be2: 8
-  be1: 12
+  failed: 0
 ```
 
-Counter dari datapath saat 40 koneksi tersebut:
+**Graceful drain** — backend tetap sehat, tapi tidak lagi menerima flow baru:
+
+```
+$ curl -X POST "localhost:9500/drain?backend=10.0.0.11:8080"
+10.0.0.11:8080 draining
+$ REQUESTS=20 make smoke
+requests: 20
+  be2: 20
+  failed: 0
+$ curl -s localhost:9500/metrics | grep 10.0.0.11
+xdplb_backend_up{...}       1        <- masih sehat
+xdplb_backend_draining{...} 1        <- tapi keluar dari rotasi
+```
+
+**Bobot mengikuti metrik** — backend kedua diturunkan ke kapasitas 25%:
+
+```
+xdplb_backend_weight{...10.0.0.11:8080"} 16
+xdplb_backend_weight{...10.0.0.12:8080"} 4
+
+requests: 60
+  be1: 48
+  be2: 12        <- tepat 4:1, sama dengan rasio bobotnya
+  failed: 0
+```
+
+**Prometheus mati** — bobot terakhir dipertahankan, trafik tidak terganggu:
+
+```
+xdplb_weight_refresh_failed_total 1
+requests: 20 ... failed: 0
+```
+
+Counter datapath saat 40 koneksi:
 
 ```
 xdplb_packets_total{verdict="conntrack_miss"}  40     # tepat satu per koneksi baru
@@ -67,10 +118,40 @@ xdplb_packets_total{verdict="conntrack_hit"}  440     # paket lanjutan tidak men
 xdplb_packets_total{verdict="drop"}             0
 ```
 
-Isi map `conntrack` 80 entry untuk 40 koneksi — dua per koneksi, satu untuk tiap arah.
+Isi map `conntrack` 80 entry untuk 40 koneksi — dua per koneksi, satu tiap arah.
 
-Uji di kernel 6.8 (Ubuntu 24.04, aarch64), mode SKB di atas veth. Belum ada angka benchmark di NIC
-fisik, jadi belum ada klaim performa apa pun. Lihat `docs/ROADMAP.md`.
+## Test
+
+Dua lapisan, karena keduanya bisa hijau sementara integrasinya rusak.
+
+```
+make test            # 34 test control plane, tanpa root
+make test-datapath   # 14 test datapath lewat BPF_PROG_TEST_RUN, butuh root
+```
+
+Test datapath menjalankan program XDP dengan paket sintetis, tanpa NIC, bridge, atau routing sama
+sekali. Dua di antaranya memverifikasi checksum IPv4 dan TCP dengan menghitung ulang dari nol atas
+paket keluaran — jadi kode checksum inkremental benar-benar diuji, bukan diasumsikan benar karena
+`curl`-nya berhasil.
+
+CI menjalankan kedua lapisan itu plus trafik nyata lewat rig network namespace pada setiap push.
+
+## Batasan yang perlu diketahui
+
+**Belum ada angka benchmark.** Semua pengujian berjalan di mode SKB di atas veth, yang membuang
+keuntungan performa utama XDP. Angka dari mode SKB tidak akan dilaporkan sebagai angka XDP. Untuk
+benchmark yang jujur dibutuhkan NIC fisik dengan dukungan XDP native.
+
+**Mode NAT menuntut LB di jalur balik.** Balasan backend harus lewat load balancer agar source IP
+bisa dikembalikan ke VIP. Kalau itu tidak bisa dijamin di topologimu, yang dibutuhkan DSR — belum
+diimplementasikan.
+
+**Rate limiting bersifat aproksimatif.** Bucket-nya per-CPU, jadi batas agregatnya mendekati angka
+yang dikonfigurasi ketika trafik menyebar rata antar CPU, dan lebih ketat ketika menumpuk di satu
+CPU. Ini pertukaran yang disengaja; alasannya ada di `docs/NOTES.md`.
+
+**Diuji di satu kernel.** Kernel 6.8 di aarch64. Klaim kompatibilitas ke bawah belum ada buktinya
+sampai CI multi-kernel jalan.
 
 ## Requirement
 
@@ -81,6 +162,15 @@ XDP hanya ada di Linux. Kernel minimal 5.15, direkomendasikan 6.8+.
 - Rust stable 1.75+
 
 Kalau development dari macOS, pakai VM Linux — lihat `docs/DEVELOPMENT.md`.
+
+## Dokumentasi
+
+| | |
+| --- | --- |
+| `docs/DEVELOPMENT.md` | Setup VM, rig test, dan urutan debugging |
+| `docs/WEIGHTING.md` | Bobot dinamis: mode, pencocokan metrik, perilaku saat metrik hilang |
+| `docs/NOTES.md` | Bug yang menghabiskan waktu paling banyak dan penjelasannya |
+| `docs/ROADMAP.md` | Yang belum dikerjakan dan yang sengaja tidak dikerjakan |
 
 ## Lisensi
 

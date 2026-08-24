@@ -58,6 +58,37 @@ Kedua langkah tetap dipertahankan, tapi dengan alasan yang jujur: object jadi tu
 40 KB ke 22 KB, dan DWARF tidak dipakai sama sekali saat runtime. `.BTF` sengaja tidak ikut
 di-strip — loader membacanya untuk mengetahui tipe key dan value setiap map.
 
+## `bpf_spin_lock` tidak diizinkan di map LRU
+
+Rate limiter awalnya memakai `bpf_spin_lock` di dalam value map supaya akunting token-nya presisi
+walau beberapa CPU menyentuh bucket yang sama. Kernel menolak saat pembuatan map:
+
+```
+MapError(CreateError { name: "rate_buckets", code: -1,
+         io_error: Os { code: 95, kind: Unsupported, message: "Operation not supported" } })
+```
+
+`map_check_btf` di kernel hanya mengizinkan spin lock di `BPF_MAP_TYPE_HASH`, `BPF_MAP_TYPE_ARRAY`,
+dan beberapa storage map. LRU tidak termasuk, dan alasannya masuk akal: eviction LRU bisa
+membebaskan sebuah elemen sementara ada yang memegang lock di dalamnya.
+
+Pindah ke `BPF_MAP_TYPE_HASH` biasa akan membuat verifier senang, tapi salah secara operasional. Map
+akan bertambah satu entry per alamat sumber dan tidak pernah menyusut — sebuah rate limiter yang
+justru bisa dihabiskan memorinya oleh penyerang yang mengganti-ganti source IP. Yang dipertahankan
+justru harus eviction-nya.
+
+Yang dipakai akhirnya `BPF_MAP_TYPE_LRU_PERCPU_HASH`. Tiap CPU punya salinan bucket sendiri, jadi
+tidak ada dua CPU yang menulis ke lokasi yang sama dan lock tidak dibutuhkan sama sekali. Bonusnya
+justru sejalan dengan alasan memakai XDP: tidak ada cache line yang diperebutkan di jalur panas.
+
+Harganya nyata dan harus disebut: batasnya jadi per-CPU. Control plane membagi rate dan burst dengan
+jumlah CPU, sehingga agregatnya mendekati angka yang dikonfigurasi **kalau** trafik menyebar rata
+antar CPU. Kalau menumpuk di satu CPU — misalnya semua dari satu flow hash — batasnya jadi lebih
+ketat dari yang diminta.
+
+Untuk mekanisme pertahanan, menyimpang ke arah lebih ketat adalah arah yang benar. Kalau yang
+dibutuhkan adalah akunting yang presisi, XDP bukan tempatnya.
+
 ## Client harus berada di subnet berbeda dari backend
 
 Di rig test, semua namespace tergabung ke satu bridge, jadi secara L2 mereka satu segmen. Tapi client
